@@ -443,13 +443,40 @@ const discord = {
     return (await this.getGuild()).channels.fetch(channelID).catch((err) => { state.logger?.error(err) });
   },
   async getCategory(nthChannel) {
-    const nthCategory = Math.floor((nthChannel + 1) / 50);
-    if (state.settings.Categories[nthCategory] == null) {
-      state.settings.Categories.push((await (await this.getGuild()).channels.create(`whatsapp ${nthCategory + 1}`, {
-        type: 'GUILD_CATEGORY',
-      })).id);
+    const guild = await this.getGuild();
+    await guild.channels.fetch();
+
+    if (!Array.isArray(state.settings.Categories)) {
+      state.settings.Categories = [];
     }
-    return state.settings.Categories[nthCategory];
+
+    let nthCategory = Math.floor((nthChannel + 1) / 50);
+
+    while (true) {
+      if (state.settings.Categories[nthCategory] == null) {
+        const categoryName = `whatsapp ${nthCategory + 1}`;
+        const category = await guild.channels.create(categoryName, { type: 'GUILD_CATEGORY' });
+        state.settings.Categories[nthCategory] = category.id;
+        continue;
+      }
+
+      const categoryId = state.settings.Categories[nthCategory];
+      const category = guild.channels.cache.get(categoryId);
+
+      if (!category) {
+        state.settings.Categories.splice(nthCategory, 1);
+        continue;
+      }
+
+      const childCount = guild.channels.cache.filter((channel) => channel.parentId === categoryId).size;
+
+      if (childCount >= 50) {
+        nthCategory += 1;
+        continue;
+      }
+
+      return categoryId;
+    }
   },
   async createChannel(name) {
     return (await this.getGuild()).channels.create(name, {
