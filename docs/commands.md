@@ -8,14 +8,21 @@ Pairing with your phone number
     - `pairWithCode 18001231234`: This would give you a code for you to enter on your phone and pair the bot with your phone number.
 
 ## start
-Starts a new conversation. It can be used with a name or a phone number. 
+Starts a new conversation. It can be used with a name or a phone number.
 - Format: `start <number with country code or name>`
 - Examples:
     - `start 11231231234`: This would start a conversation with +1 123 123 1234.
     - `start John Doe`: This would start a conversation with John Doe. It has to be in your contacts.
 
+## link
+Links an existing Discord text channel to a WhatsApp conversation without creating a new channel.
+- Format: `link <number with country code or name> #<channel name>`
+- Examples:
+    - `link 11231231234 #existing-chat`: This would connect the WhatsApp conversation with +1 123 123 1234 to the mentioned Discord channel.
+    - `link John Doe #team-chat`: This would connect the WhatsApp conversation with John Doe to the mentioned Discord channel.
+
 ## list
-Lists your contacts and groups. 
+Lists your contacts and groups.
 - Format: `list <optional chat name to search>`
 - Examples:
     - `list`: This would list all of your contacts and groups.

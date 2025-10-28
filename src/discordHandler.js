@@ -1,8 +1,9 @@
 const { Client, Intents } = require('discord.js');
 
+const fs = require('fs');
 const state = require('./state.js');
 const utils = require('./utils.js');
-const fs = require('fs');
+const storage = require('./storage.js');
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 
@@ -421,6 +422,107 @@ const commands = {
     if (state.settings.Whitelist.length) {
       state.settings.Whitelist.push(jid);
     }
+  },
+  async link(message, params) {
+    const channel = message.mentions.channels.first();
+    const cleanedParams = params.filter(Boolean);
+    if (!channel || cleanedParams.length < 2) {
+      await controlChannel.send('Please provide a contact and a channel. Usage: `link <number with country code or name> #<channel>`');
+      return;
+    }
+
+    if (channel.id === state.settings.ControlChannelID) {
+      await controlChannel.send('The control channel cannot be linked. Please choose another channel.');
+      return;
+    }
+
+    if (channel.guildId !== state.settings.GuildID) {
+      await controlChannel.send('Please choose a channel from the configured Discord server.');
+      return;
+    }
+
+    if (!['GUILD_TEXT', 'GUILD_NEWS'].includes(channel.type)) {
+      await controlChannel.send('Only text channels can be linked. Please choose a text channel.');
+      return;
+    }
+
+    const mentionTokenLower = `<#${channel.id}>`.toLowerCase();
+    const mentionIndex = cleanedParams.indexOf(mentionTokenLower);
+    const contactTokens = mentionIndex === -1 ? cleanedParams.filter((token) => token !== mentionTokenLower) : cleanedParams.slice(0, mentionIndex);
+
+    if (!contactTokens.length) {
+      await controlChannel.send('Please provide a contact before the channel mention. Usage: `link <number with country code or name> #<channel>`');
+      return;
+    }
+
+    const jidQuery = contactTokens.join(' ');
+    const jid = utils.whatsapp.toJid(jidQuery);
+    if (!jid) {
+      await controlChannel.send(`Couldn't find \`${jidQuery}\`.`);
+      return;
+    }
+
+    const existingJid = utils.discord.channelIdToJid(channel.id);
+    if (existingJid && existingJid !== jid) {
+      await controlChannel.send('That channel is already linked to another WhatsApp conversation.');
+      return;
+    }
+
+    let webhook;
+    try {
+      const webhooks = await channel.fetchWebhooks();
+      webhook = webhooks.find((hook) => hook.token && hook.owner?.id === client.user.id);
+      if (!webhook) {
+        webhook = await channel.createWebhook('WA2DC');
+      }
+    } catch (err) {
+      state.logger?.error(err);
+      await controlChannel.send('Failed to access or create a webhook for that channel. Check the bot\'s permissions.');
+      return;
+    }
+
+    const previousChat = state.chats[jid];
+    const previousChannelId = previousChat?.channelId;
+    const previousRun = state.goccRuns[jid];
+    state.chats[jid] = {
+      id: webhook.id,
+      type: webhook.type,
+      token: webhook.token,
+      channelId: webhook.channelId,
+    };
+    delete state.goccRuns[jid];
+
+    try {
+      await utils.discord.getOrCreateChannel(jid);
+      await storage.save();
+    } catch (err) {
+      state.logger?.error(err);
+      if (previousChat) {
+        state.chats[jid] = previousChat;
+      } else {
+        delete state.chats[jid];
+      }
+      if (previousRun) {
+        state.goccRuns[jid] = previousRun;
+      } else {
+        delete state.goccRuns[jid];
+      }
+      await controlChannel.send('Linked the channel, but failed to finalize the setup. Please try again.');
+      return;
+    }
+
+    if (previousChannelId && previousChannelId !== channel.id && previousChat?.id) {
+      try {
+        const previousChannel = await utils.discord.getChannel(previousChannelId);
+        const previousWebhooks = await previousChannel?.fetchWebhooks();
+        const previousWebhook = previousWebhooks?.get(previousChat.id) || previousWebhooks?.find((hook) => hook.id === previousChat.id);
+        await previousWebhook?.delete('WA2DC channel relinked');
+      } catch (err) {
+        state.logger?.warn(err);
+      }
+    }
+
+    await controlChannel.send(`Linked ${channel} with \`${utils.whatsapp.jidToName(jid)}\`.`);
   },
   async list(_message, params) {
     let contacts = utils.whatsapp.contacts();
