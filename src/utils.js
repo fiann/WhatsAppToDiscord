@@ -142,17 +142,62 @@ const updater = {
   currentExeName: process.argv0.split(/[/\\]/).pop(),
 
   async renameOldVersion() {
-    await fs.promises.rename(this.currentExeName, `${this.currentExeName}.oldVersion`);
+    const currentPath = this.currentExeName;
+    const backupPath = `${currentPath}.oldVersion`;
+
+    try {
+      await fs.promises.access(currentPath, fs.constants.F_OK);
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        return false;
+      }
+      throw err;
+    }
+
+    try {
+      await fs.promises.rm(backupPath, { force: true });
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        state.logger?.warn({ err }, 'Failed to remove previous backup before update.');
+      }
+    }
+
+    await fs.promises.rename(currentPath, backupPath);
+    return true;
   },
 
   cleanOldVersion() {
-    fs.unlink(`${this.currentExeName}.oldVersion`, () => 0);
+    fs.rm(`${this.currentExeName}.oldVersion`, { force: true }, () => 0);
   },
 
-  revertChanges() {
-    fs.unlink(this.currentExeName, () => {
-      fs.rename(`${this.currentExeName}.oldVersion`, this.currentExeName, () => 0);
-    });
+  async revertChanges() {
+    const currentPath = this.currentExeName;
+    const backupPath = `${currentPath}.oldVersion`;
+
+    try {
+      await fs.promises.access(backupPath, fs.constants.F_OK);
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        return;
+      }
+      throw err;
+    }
+
+    try {
+      await fs.promises.rm(currentPath, { force: true });
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        state.logger?.error({ err }, 'Failed to remove partially downloaded update.');
+        throw err;
+      }
+    }
+
+    try {
+      await fs.promises.rename(backupPath, currentPath);
+    } catch (err) {
+      state.logger?.error({ err }, 'Failed to restore original executable after update failure.');
+      throw err;
+    }
   },
 
   async fetchLatestVersion() {
@@ -235,16 +280,26 @@ const updater = {
     }
 
     await this.renameOldVersion();
-    const downloadStatus = await this.downloadLatestVersion(defaultExeName, currExeName);
+
+    let downloadStatus;
+    try {
+      downloadStatus = await this.downloadLatestVersion(defaultExeName, currExeName);
+    } catch (err) {
+      state.logger?.error({ err }, 'Download failed! Skipping update.');
+      await this.revertChanges();
+      return false;
+    }
+
     if (!downloadStatus) {
       state.logger?.error('Download failed! Skipping update.');
+      await this.revertChanges();
       return false;
     }
 
     const signature = await this.downloadSignature(defaultExeName);
     if (signature && !this.validateSignature(signature.result, currExeName)) {
       state.logger?.error("Couldn't verify the signature of the updated binary, reverting back. Please update manually.");
-      this.revertChanges();
+      await this.revertChanges();
       return false;
     }
     this.cleanOldVersion();
