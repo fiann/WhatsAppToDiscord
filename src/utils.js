@@ -1039,25 +1039,11 @@ const whatsapp = {
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;
     for (const contact of contacts) {
-      if (!contact?.id) continue;
-
-      const name = [
-        contact.name,
-        contact.verifiedName,
-        contact.formattedName,
-        contact.notify,
-        contact.pushName,
-        contact.pushname,
-        contact.shortName,
-        contact.subject,
-      ].find((value) => typeof value === 'string' && value.trim().length > 0);
-
-      if (!name) continue;
-
-      const trimmedName = name.trim();
-
-      state.waClient.contacts[contact.id] = trimmedName;
-      state.contacts[contact.id] = trimmedName;
+      const name = contact.name || contact.subject;
+      if (name) {
+        state.waClient.contacts[contact.id] = name;
+        state.contacts[contact.id] = name;
+      }
     }
   },
   createDocumentContent(attachment) {
