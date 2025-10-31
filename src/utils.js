@@ -572,31 +572,247 @@ const discord = {
     return webhook;
   },
   async safeWebhookSend(webhook, args, jid) {
-    try {
-      return await webhook.send(args);
-    } catch (err) {
-      if (err.code === 10015 && err.message.includes('Unknown Webhook')) {
-        delete state.goccRuns[jid];
-        const channel = await this.getChannel(state.chats[jid].channelId);
-        webhook = ensureWebhookReplySupport(await channel.createWebhook('WA2DC'));
-        state.chats[jid] = {
-          id: webhook.id,
-          type: webhook.type,
-          token: webhook.token,
-          channelId: webhook.channelId,
-        };
-        return await webhook.send(args);
+    const configuredRetriesRaw = state.settings?.DiscordUploadRetryAttempts;
+    const configuredRetries = Number(configuredRetriesRaw);
+    const maxAbortRetries = Number.isFinite(configuredRetries) && configuredRetries >= 1
+      ? Math.floor(configuredRetries)
+      : 3;
+
+    const isAbortError = (err) =>
+      err?.name === 'AbortError'
+      || err?.name === 'AbortError2'
+      || err?.code === 'ABORT_ERR'
+      || /aborted/i.test(err?.message || '');
+
+    const extractFileNames = (files) => {
+      if (!Array.isArray(files)) return [];
+      return files
+        .map((file, index) => {
+          if (!file) return null;
+          if (typeof file === 'string') return file;
+          if (Buffer.isBuffer(file)) return `Attachment ${index + 1}`;
+          return file.name
+            || file.attachment?.name
+            || file.attachment?.filename
+            || (typeof file.attachment?.path === 'string' ? path.basename(file.attachment.path) : null)
+            || `Attachment ${index + 1}`;
+        })
+        .filter(Boolean);
+    };
+
+    const snapshotFileForRetry = (file) => {
+      if (file == null || typeof file === 'number') {
+        return { type: 'raw', data: file, retryable: true };
       }
-      if (err.code === 40005 || err.httpStatus === 413) {
-        const content = `WA2DC Attention: Received a file, but it's over Discord's upload limit. Check WhatsApp on your phone${state.settings.LocalDownloads ? '' : ' or enable local downloads.'}`;
-        return await webhook.send({
-          content,
-          username: args.username,
-          avatarURL: args.avatarURL,
-        });
+      if (typeof file === 'string' || Buffer.isBuffer(file)) {
+        return { type: 'raw', data: file, retryable: true };
       }
-      throw err;
+
+      const { attachment, file: fileProp, ...rest } = file;
+      const snapshotBase = {
+        rest,
+        includeFileProperty: typeof fileProp !== 'undefined',
+      };
+
+      if (attachment == null) {
+        return { ...snapshotBase, type: 'object', retryable: true };
+      }
+      if (typeof attachment === 'string' || Buffer.isBuffer(attachment)) {
+        return { ...snapshotBase, type: 'buffer', data: attachment, retryable: true };
+      }
+      if (attachment && typeof attachment.path === 'string') {
+        return { ...snapshotBase, type: 'path', path: attachment.path, retryable: true };
+      }
+      if (rest.downloadCtx) {
+        return { ...snapshotBase, type: 'wa', retryable: true };
+      }
+      if (typeof attachment.pipe === 'function') {
+        return { ...snapshotBase, type: 'stream', retryable: false };
+      }
+      return { ...snapshotBase, type: 'unknown', data: attachment, retryable: false };
+    };
+
+    const recreateFileFromSnapshot = async (snapshot) => {
+      switch (snapshot.type) {
+        case 'raw':
+          return snapshot.data;
+        case 'object': {
+          const base = { ...snapshot.rest };
+          if (snapshot.includeFileProperty) {
+            base.file = base.attachment;
+          }
+          return base;
+        }
+        case 'buffer': {
+          const base = { ...snapshot.rest, attachment: snapshot.data };
+          if (snapshot.includeFileProperty) {
+            base.file = base.attachment;
+          }
+          return base;
+        }
+        case 'path': {
+          try {
+            const attachment = fs.createReadStream(snapshot.path);
+            const base = { ...snapshot.rest, attachment };
+            if (snapshot.includeFileProperty) {
+              base.file = attachment;
+            }
+            return base;
+          } catch (error) {
+            const retryError = new Error(`Failed to recreate attachment from path: ${snapshot.path}`);
+            retryError.cause = error;
+            retryError.wa2dcAttachmentRebuildFailed = true;
+            throw retryError;
+          }
+        }
+        case 'wa': {
+          try {
+            const attachment = await downloadMediaMessage(
+              snapshot.rest.downloadCtx,
+              'stream',
+              {},
+              {
+                logger: state.logger,
+                reuploadRequest: state.waClient.updateMediaMessage,
+              },
+            );
+            const base = { ...snapshot.rest, attachment };
+            if (snapshot.includeFileProperty) {
+              base.file = attachment;
+            }
+            return base;
+          } catch (error) {
+            const retryError = new Error('Failed to re-download WhatsApp media for retry');
+            retryError.cause = error;
+            retryError.wa2dcAttachmentRebuildFailed = true;
+            throw retryError;
+          }
+        }
+        case 'stream':
+        case 'unknown': {
+          const retryError = new Error('Attachment cannot be retried because the original stream cannot be reconstructed');
+          retryError.wa2dcAttachmentRebuildFailed = true;
+          throw retryError;
+        }
+        default:
+          return snapshot.data ?? null;
+      }
+    };
+
+    const { files: originalFiles, ...restArgs } = args;
+    const baseArgsWithoutFiles = { ...restArgs };
+    const hasFilesArray = Array.isArray(originalFiles);
+    const fileSnapshots = hasFilesArray ? originalFiles.map(snapshotFileForRetry) : null;
+    const attachmentsRetryable = !fileSnapshots || fileSnapshots.every((snapshot) => snapshot.retryable !== false);
+
+    const buildArgsFromSnapshots = async () => {
+      const builtArgs = { ...baseArgsWithoutFiles };
+      if (hasFilesArray) {
+        const rebuiltFiles = await Promise.all(fileSnapshots.map(recreateFileFromSnapshot));
+        if (rebuiltFiles.some((file) => file == null)) {
+          const retryError = new Error('Failed to rebuild one or more attachments for retry');
+          retryError.wa2dcAttachmentRebuildFailed = true;
+          throw retryError;
+        }
+        builtArgs.files = rebuiltFiles;
+      }
+      return builtArgs;
+    };
+
+    let attempt = 0;
+    let attemptsMade = 0;
+    let useOriginalFiles = true;
+    let lastAbortError = null;
+
+    while (attempt < maxAbortRetries) {
+      let sendArgs;
+      try {
+        sendArgs = useOriginalFiles ? args : await buildArgsFromSnapshots();
+      } catch (prepErr) {
+        attemptsMade = attempt + 1;
+        if (prepErr.wa2dcAttachmentRebuildFailed) {
+          lastAbortError = prepErr;
+          break;
+        }
+        throw prepErr;
+      }
+      useOriginalFiles = false;
+
+      try {
+        return await webhook.send(sendArgs);
+      } catch (err) {
+        attemptsMade = attempt + 1;
+        if (err.code === 10015 && err.message.includes('Unknown Webhook')) {
+          delete state.goccRuns[jid];
+          const chatInfo = state.chats[jid];
+          if (!chatInfo?.channelId) {
+            throw err;
+          }
+          const channel = await this.getChannel(chatInfo.channelId);
+          webhook = ensureWebhookReplySupport(await channel.createWebhook('WA2DC'));
+          state.chats[jid] = {
+            id: webhook.id,
+            type: webhook.type,
+            token: webhook.token,
+            channelId: webhook.channelId,
+          };
+          attempt += 1;
+          continue;
+        }
+        if (err.code === 40005 || err.httpStatus === 413) {
+          const content = `WA2DC Attention: Received a file, but it's over Discord's upload limit. Check WhatsApp on your phone${state.settings.LocalDownloads ? '' : ' or enable local downloads.'}`;
+          const fallbackArgs = {
+            ...baseArgsWithoutFiles,
+            content,
+          };
+          if (hasFilesArray) {
+            fallbackArgs.files = [];
+          }
+          return await webhook.send(fallbackArgs);
+        }
+        if (err.wa2dcAttachmentRebuildFailed) {
+          lastAbortError = err;
+          break;
+        }
+        if (isAbortError(err)) {
+          lastAbortError = err;
+          state.logger?.warn({ err, attempt: attempt + 1 }, 'Discord webhook request was aborted.');
+          if (!attachmentsRetryable) {
+            state.logger?.warn('Attachments cannot be retried because their sources are not reproducible. Sending fallback message.');
+            break;
+          }
+          attempt += 1;
+          if (attempt >= maxAbortRetries) {
+            break;
+          }
+          continue;
+        }
+        throw err;
+      }
     }
+
+    const attemptsForMessage = Math.max(attemptsMade, lastAbortError ? 1 : 0) || 1;
+    const fileNames = extractFileNames(originalFiles);
+    const attemptText = ` after ${attemptsForMessage} attempt${attemptsForMessage === 1 ? '' : 's'}`;
+    const attachmentNotice = fileNames.length
+      ? ` Discord aborted the upload${attemptText} for: ${fileNames.join(', ')}.`
+      : ` Discord aborted the upload${attemptText}.`;
+    const originalContent = typeof args.content === 'string' ? args.content.trim() : '';
+    const fallbackParts = [];
+    if (originalContent) {
+      fallbackParts.push(originalContent);
+    }
+    fallbackParts.push(`WA2DC Attention:${attachmentNotice} Please check WhatsApp for the original message.`);
+    const fallbackContent = fallbackParts.join('\n\n');
+    const fallbackArgs = {
+      ...baseArgsWithoutFiles,
+      content: fallbackContent,
+    };
+    if (hasFilesArray) {
+      fallbackArgs.files = [];
+    }
+    state.logger?.error({ err: lastAbortError, attempts: attemptsForMessage }, 'Discord webhook request was aborted repeatedly; sending fallback message.');
+    return await webhook.send(fallbackArgs);
   },
   async safeWebhookEdit(webhook, messageId, args, jid) {
     try {
@@ -961,6 +1177,8 @@ const whatsapp = {
           reuploadRequest: state.waClient.updateMediaMessage,
         }),
         largeFile,
+        downloadCtx: rawMsg,
+        msgType: nMsgType,
       };
     } catch (err) {
       if (err?.message?.includes('Unrecognised filter type') || err?.message?.includes('Unrecognized filter type')) {
