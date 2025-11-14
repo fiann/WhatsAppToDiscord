@@ -18,6 +18,7 @@ const connectToWhatsApp = async (retry = 1) => {
         auth: authState,
         logger: state.logger,
         markOnlineOnConnect: false,
+        syncFullHistory: true,
         shouldSyncHistoryMessage: () => true,
         generateHighQualityLinkPreview: false,
         browser: ["Firefox (Linux)", "", ""]
