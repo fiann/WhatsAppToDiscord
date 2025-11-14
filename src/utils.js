@@ -1070,7 +1070,29 @@ const whatsapp = {
       .send({ files: [new MessageAttachment(await QRCode.toBuffer(qrString), 'qrcode.png')] });
   },
   getChannelJid(rawMsg) {
-    return this.formatJid(rawMsg?.key?.remoteJid || rawMsg.chatId);
+    const rawJid = rawMsg?.key?.remoteJid
+      || rawMsg?.chatId
+      || rawMsg?.attrs?.from
+      || rawMsg?.from
+      || rawMsg?.jid;
+
+    if (!rawJid) return null;
+
+    const formattedJid = this.formatJid(rawJid);
+    if (!formattedJid) return formattedJid;
+
+    if (state.chats[formattedJid]) {
+      return formattedJid;
+    }
+
+    const phone = this.jidToPhone(formattedJid);
+    for (const existingJid of Object.keys(state.chats)) {
+      if (this.jidToPhone(existingJid) === phone) {
+        return existingJid;
+      }
+    }
+
+    return formattedJid;
   },
   getSenderJid(rawMsg, fromMe) {
     if (fromMe) { return this.formatJid(state.waClient.user.id); }
