@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@adiwajshing/keyed-db": "^0.2.4",
-    "@whiskeysockets/baileys": "^7.0.0-rc.7",
+    "@whiskeysockets/baileys": "^7.0.0-rc.8",
     "discord.js": "^13.16.0",
     "link-preview-js": "^3.0.0",
     "pino": "^8.14.1",
