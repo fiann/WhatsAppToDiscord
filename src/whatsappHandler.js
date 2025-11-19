@@ -119,12 +119,12 @@ const connectToWhatsApp = async (retry = 1) => {
                 const [nMsgType, message] = utils.whatsapp.getMessage(rawMessage, messageType);
                 state.dcClient.emit('whatsappMessage', {
                     id: utils.whatsapp.getId(rawMessage),
-                    name: utils.whatsapp.getSenderName(rawMessage),
+                    name: await utils.whatsapp.getSenderName(rawMessage),
                     content: utils.whatsapp.getContent(message, nMsgType, messageType),
                     quote: await utils.whatsapp.getQuote(rawMessage),
                     file: await utils.whatsapp.getFile(rawMessage, messageType),
                     profilePic: await utils.whatsapp.getProfilePic(rawMessage),
-                    channelJid: utils.whatsapp.getChannelJid(rawMessage),
+                    channelJid: await utils.whatsapp.getChannelJid(rawMessage),
                     isGroup: utils.whatsapp.isGroup(rawMessage),
                     isForwarded: utils.whatsapp.isForwarded(message),
                     isEdit: messageType === 'editedMessage'
@@ -148,9 +148,9 @@ const connectToWhatsApp = async (retry = 1) => {
 
             state.dcClient.emit('whatsappReaction', {
                 id: msgId,
-                jid: utils.whatsapp.getChannelJid(rawReaction),
+                jid: await utils.whatsapp.getChannelJid(rawReaction),
                 text: rawReaction.reaction.text,
-                author: utils.whatsapp.getSenderJid(rawReaction, rawReaction.key.fromMe),
+                author: await utils.whatsapp.getSenderJid(rawReaction, rawReaction.key.fromMe),
             });
             const ts = utils.whatsapp.getTimestamp(rawReaction);
             if (ts > state.startTime) state.startTime = ts;
@@ -161,7 +161,7 @@ const connectToWhatsApp = async (retry = 1) => {
         const keys = 'keys' in updates ? updates.keys : updates;
         for (const key of keys) {
             if (!utils.whatsapp.inWhitelist({ key })) continue;
-            const jid = utils.whatsapp.getChannelJid({ key });
+            const jid = await utils.whatsapp.getChannelJid({ key });
             if (!jid) continue;
             state.dcClient.emit('whatsappDelete', {
                 id: key.id,
@@ -176,7 +176,7 @@ const connectToWhatsApp = async (retry = 1) => {
                 [WAMessageStatus.READ, WAMessageStatus.PLAYED].includes(update.status)) {
                 state.dcClient.emit('whatsappRead', {
                     id: key.id,
-                    jid: utils.whatsapp.getChannelJid({ key }),
+                    jid: await utils.whatsapp.getChannelJid({ key }),
                 });
             }
 
@@ -189,7 +189,7 @@ const connectToWhatsApp = async (retry = 1) => {
             if (!utils.whatsapp.inWhitelist({ key: msgKey })) continue;
             state.dcClient.emit('whatsappDelete', {
                 id: msgKey.id,
-                jid: utils.whatsapp.getChannelJid({ key: msgKey }),
+                jid: await utils.whatsapp.getChannelJid({ key: msgKey }),
             });
         }
     });
@@ -200,7 +200,7 @@ const connectToWhatsApp = async (retry = 1) => {
                 return;
 
             state.dcClient.emit('whatsappCall', {
-                jid: utils.whatsapp.getChannelJid(call),
+                jid: await utils.whatsapp.getChannelJid(call),
                 call,
             });
             const ts = utils.whatsapp.getTimestamp(call);
@@ -222,7 +222,7 @@ const connectToWhatsApp = async (retry = 1) => {
                 name: "WA2DC",
                 content: "[BOT] " + (removed ? "User removed their profile picture!" : "User changed their profile picture!"),
                 profilePic: utils.whatsapp._profilePicsCache[contact.id],
-                channelJid: utils.whatsapp.getChannelJid({ chatId: contact.id }),
+                channelJid: await utils.whatsapp.getChannelJid({ chatId: contact.id }),
                 isGroup: contact.id.endsWith('@g.us'),
                 isForwarded: false,
                 file: removed ? null : await client.profilePictureUrl(contact.id, 'image').catch(() => null),
@@ -255,7 +255,7 @@ const connectToWhatsApp = async (retry = 1) => {
             name: "WA2DC",
             content: "[BOT] User changed their status to: " + status,
             profilePic: utils.whatsapp._profilePicsCache[update.attrs.from],
-            channelJid: utils.whatsapp.getChannelJid({ chatId: update.attrs.from }),
+            channelJid: await utils.whatsapp.getChannelJid({ chatId: update.attrs.from }),
             isGroup: update.attrs.from.endsWith('@g.us'),
             isForwarded: false,
         });

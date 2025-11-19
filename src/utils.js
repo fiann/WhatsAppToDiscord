@@ -1045,6 +1045,12 @@ const whatsapp = {
     const cleanUser = userPart.split(':')[0];
     return `${cleanUser}@${serverPart}`;
   },
+  isPhoneJid(jid = '') {
+    return typeof jid === 'string' && jid.endsWith('@s.whatsapp.net');
+  },
+  isLidJid(jid = '') {
+    return typeof jid === 'string' && jid.endsWith('@lid');
+  },
   migrateLegacyJid(oldJid, newJid) {
     const legacy = this.formatJid(oldJid);
     const fresh = this.formatJid(newJid);
@@ -1145,28 +1151,59 @@ const whatsapp = {
     await (await discord.getControlChannel())
       .send({ files: [new MessageAttachment(await QRCode.toBuffer(qrString), 'qrcode.png')] });
   },
-  getChannelJid(rawMsg) {
-    const [primary, alternate] = this.getChatJidCandidates(rawMsg);
-    if (primary && alternate) {
-      this.migrateLegacyJid(alternate, primary);
+  async hydrateJidPair(primary, alternate) {
+    let preferred = this.formatJid(primary);
+    let fallback = this.formatJid(alternate);
+    if (preferred && fallback) {
+      this.migrateLegacyJid(fallback, preferred);
+      return [preferred, fallback];
     }
+
+    const store = state.waClient?.signalRepository?.lidMapping;
+    if (!store || !preferred) {
+      return [preferred, fallback];
+    }
+
+    try {
+      if (!fallback && this.isLidJid(preferred) && typeof store.getPNForLID === 'function') {
+        const pnJid = this.formatJid(await store.getPNForLID(preferred));
+        if (pnJid) {
+          fallback = pnJid;
+          this.migrateLegacyJid(pnJid, preferred);
+        }
+      } else if (!fallback && this.isPhoneJid(preferred) && typeof store.getLIDForPN === 'function') {
+        const lidJid = this.formatJid(await store.getLIDForPN(preferred));
+        if (lidJid) {
+          this.migrateLegacyJid(preferred, lidJid);
+          fallback = preferred;
+          preferred = lidJid;
+        }
+      }
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to hydrate JID pair from LID mapping store');
+    }
+
+    return [preferred, fallback];
+  },
+  async getChannelJid(rawMsg) {
+    const [candidatePrimary, candidateAlternate] = this.getChatJidCandidates(rawMsg);
+    const [primary, alternate] = await this.hydrateJidPair(candidatePrimary, candidateAlternate);
     return this.resolveKnownJid(primary, alternate);
   },
-  getSenderJid(rawMsg, fromMe) {
+  async getSenderJid(rawMsg, fromMe) {
     if (fromMe) { return this.formatJid(state.waClient.user.id); }
     const { key = {} } = rawMsg || {};
     const participant = this.formatJid(key.participant || rawMsg?.participant);
     const participantAlt = this.formatJid(key.participantAlt || rawMsg?.participantAlt || key.remoteJidAlt);
-    if (participant && participantAlt) {
-      this.migrateLegacyJid(participantAlt, participant);
-    }
-    const resolved = this.resolveKnownJid(participant, participantAlt);
+    const [primary, alternate] = await this.hydrateJidPair(participant, participantAlt);
+    const resolved = this.resolveKnownJid(primary, alternate);
     if (resolved) return resolved;
-    const [chatJid] = this.getChatJidCandidates(rawMsg);
-    return chatJid;
+    const [chatCandidatePrimary, chatCandidateAlternate] = this.getChatJidCandidates(rawMsg);
+    const [chatPrimary, chatAlternate] = await this.hydrateJidPair(chatCandidatePrimary, chatCandidateAlternate);
+    return this.resolveKnownJid(chatPrimary, chatAlternate) || chatPrimary || chatAlternate;
   },
-  getSenderName(rawMsg) {
-    return this.jidToName(this.getSenderJid(rawMsg, rawMsg.key.fromMe), rawMsg.pushName);
+  async getSenderName(rawMsg) {
+    return this.jidToName(await this.getSenderJid(rawMsg, rawMsg.key.fromMe), rawMsg.pushName);
   },
   isGroup(rawMsg) {
     return rawMsg.key.participant != null;
@@ -1199,7 +1236,7 @@ const whatsapp = {
       }
       const downloadCtx = {
         key: {
-          remoteJid: this.getChannelJid(rawMsg) || rawMsg.key.remoteJid,
+          remoteJid: (await this.getChannelJid(rawMsg)) || rawMsg.key.remoteJid,
           id: context.stanzaId,
           fromMe: rawMsg.key.fromMe,
           participant: quoteParticipant,
@@ -1307,7 +1344,7 @@ const whatsapp = {
   },
   _profilePicsCache: {},
   async getProfilePic(rawMsg) {
-    const jid = this.getSenderJid(rawMsg, rawMsg?.key?.fromMe);
+    const jid = await this.getSenderJid(rawMsg, rawMsg?.key?.fromMe);
     if (this._profilePicsCache[jid] === undefined) {
       this._profilePicsCache[jid] = await state.waClient.profilePictureUrl(jid, 'preview').catch(() => null);
     }
