@@ -39,6 +39,10 @@ docker compose up -d
 
 The compose file mounts the `storage` directory so data is kept between container restarts.
 
+## Troubleshooting
+
+- **Duplicate Discord channels after the LID migration** – If a conversation suddenly starts flowing into a brand-new Discord channel, re-link it back to the original room via the control channel (`link <contact> #old-channel`) rather than editing files on disk. The bot will create a webhook inside the existing channel, clean up the stray webhook, and update its saved metadata. If you prefer to reuse the webhook that already exists in the duplicate channel, edit it in the Discord UI and change its target channel—the bridge keeps sending through whatever channel that webhook references because it only stores the id/token.
+
 ## Setup
 
 The setup is short, but challenging for some. So, we explained every step in detail for your convenience, just [click here](setup.md) to get started.
