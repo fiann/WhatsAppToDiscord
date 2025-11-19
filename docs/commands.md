@@ -16,10 +16,20 @@ Starts a new conversation. It can be used with a name or a phone number.
 
 ## link
 Links an existing Discord text channel to a WhatsApp conversation without creating a new channel.
-- Format: `link <number with country code or name> #<channel name>`
+- Format: `link <number with country code or name> #<channel name> [--force|-f]`
 - Examples:
     - `link 11231231234 #existing-chat`: This would connect the WhatsApp conversation with +1 123 123 1234 to the mentioned Discord channel.
     - `link John Doe #team-chat`: This would connect the WhatsApp conversation with John Doe to the mentioned Discord channel.
+- Tips:
+    - Add `--force` (or `-f`) to override a Discord channel that's already linked to a different WhatsApp conversation.
+
+## move
+Moves an existing WhatsApp link (and its webhook) from one Discord channel to another without editing files manually.
+- Format: `move #<current channel> #<new channel> [--force|-f]`
+- Examples:
+    - `move #duplicate-channel #original-room --force`: This reassigns the WhatsApp chat that is currently writing in `#duplicate-channel` so it posts in `#original-room` instead (and deletes the redundant webhook).
+- Tips:
+    - Use `--force` (or `-f`) when the destination channel is already linked to some other WhatsApp conversation.
 
 ## list
 Lists your contacts and groups.

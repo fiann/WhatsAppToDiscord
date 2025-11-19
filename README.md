@@ -48,7 +48,7 @@ container restarts.
 
 ## Troubleshooting
 
-- **Duplicate Discord channels after the LID migration** – If a chat suddenly starts posting to a brand-new Discord channel, re-link it back to the original room from the control channel instead of editing `storage/chats.json` by hand. Run `link <contact> #old-channel` (or `start <jid> #old-channel` for a brand-new contact) and the bot will recreate its webhook inside the existing Discord channel, delete the stray webhook, and update the saved chat metadata. If you already created a webhook in the duplicate channel and just want to reuse it, open the Discord UI, edit that webhook, and change its target channel to the original room—the bridge will follow wherever that webhook points because it only stores the webhook id/token.
+- **Duplicate Discord channels after the LID migration** – If a chat suddenly starts posting to a brand-new Discord channel, re-link it back to the original room from the control channel instead of editing `storage/chats.json` by hand. Run `link --force <contact> #old-channel` (or `start <jid> #old-channel` for a brand-new contact) and the bot will recreate its webhook inside the existing Discord channel, delete the stray webhook, and update the saved chat metadata. If you just want to repoint the webhook that already lives inside the duplicate channel, run `move #duplicate-channel #old-channel --force` to move the WhatsApp conversation (and clean up the redundant webhook) in one step.
 
 ### Automatic updates
 

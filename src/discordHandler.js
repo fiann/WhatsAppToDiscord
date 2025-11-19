@@ -21,6 +21,7 @@ let controlChannel;
 const pendingAlbums = {};
 const typingTimeouts = {};
 const deliveredMessages = new Set();
+const FORCE_TOKENS = new Set(['--force', '-f']);
 
 const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) => {
   let msgContent = '';
@@ -431,7 +432,9 @@ const commands = {
   async link(message, params) {
     const channel = message.mentions.channels.first();
     const cleanedParams = params.filter(Boolean);
-    if (!channel || cleanedParams.length < 2) {
+    const force = cleanedParams.some((token) => FORCE_TOKENS.has(token));
+    const paramsWithoutFlags = cleanedParams.filter((token) => !FORCE_TOKENS.has(token));
+    if (!channel || paramsWithoutFlags.length < 2) {
       await controlChannel.send('Please provide a contact and a channel. Usage: `link <number with country code or name> #<channel>`');
       return;
     }
@@ -452,8 +455,10 @@ const commands = {
     }
 
     const mentionTokenLower = `<#${channel.id}>`.toLowerCase();
-    const mentionIndex = cleanedParams.indexOf(mentionTokenLower);
-    const contactTokens = mentionIndex === -1 ? cleanedParams.filter((token) => token !== mentionTokenLower) : cleanedParams.slice(0, mentionIndex);
+    const mentionIndex = paramsWithoutFlags.indexOf(mentionTokenLower);
+    const contactTokens = mentionIndex === -1
+      ? paramsWithoutFlags.filter((token) => token !== mentionTokenLower)
+      : paramsWithoutFlags.slice(0, mentionIndex);
 
     if (!contactTokens.length) {
       await controlChannel.send('Please provide a contact before the channel mention. Usage: `link <number with country code or name> #<channel>`');
@@ -469,9 +474,18 @@ const commands = {
     }
 
     const existingJid = utils.discord.channelIdToJid(channel.id);
+    const forcedTakeover = Boolean(existingJid && existingJid !== normalizedJid && force);
+    let displacedChat;
+    let displacedRun;
     if (existingJid && existingJid !== normalizedJid) {
-      await controlChannel.send('That channel is already linked to another WhatsApp conversation.');
-      return;
+      if (!force) {
+        await controlChannel.send('That channel is already linked to another WhatsApp conversation. Add `--force` (or use the `move` command) to override it.');
+        return;
+      }
+      displacedChat = state.chats[existingJid];
+      displacedRun = state.goccRuns[existingJid];
+      delete state.chats[existingJid];
+      delete state.goccRuns[existingJid];
     }
 
     let webhook;
@@ -513,6 +527,14 @@ const commands = {
       } else {
         delete state.goccRuns[normalizedJid];
       }
+      if (forcedTakeover) {
+        if (displacedChat) {
+          state.chats[existingJid] = displacedChat;
+        }
+        if (displacedRun) {
+          state.goccRuns[existingJid] = displacedRun;
+        }
+      }
       await controlChannel.send('Linked the channel, but failed to finalize the setup. Please try again.');
       return;
     }
@@ -528,7 +550,152 @@ const commands = {
       }
     }
 
-    await controlChannel.send(`Linked ${channel} with \`${utils.whatsapp.jidToName(normalizedJid)}\`.`);
+    const forcedSuffix = forcedTakeover
+      ? ` (overrode the previous link to \`${utils.whatsapp.jidToName(existingJid)}\`).`
+      : '.';
+    await controlChannel.send(`Linked ${channel} with \`${utils.whatsapp.jidToName(normalizedJid)}\`${forcedSuffix}`);
+  },
+  async move(message, params) {
+    const cleanedParams = params.filter(Boolean);
+    const force = cleanedParams.some((token) => FORCE_TOKENS.has(token));
+    const mentionMatches = message.content.match(/<#(\d+)>/g) || [];
+    const orderedIds = [];
+    for (const token of mentionMatches) {
+      const id = token.replace(/[^\d]/g, '');
+      if (id && !orderedIds.includes(id)) {
+        orderedIds.push(id);
+      }
+      if (orderedIds.length === 2) {
+        break;
+      }
+    }
+
+    const [sourceId, targetId] = orderedIds;
+    const source = sourceId ? message.mentions.channels.get(sourceId) : null;
+    const target = targetId ? message.mentions.channels.get(targetId) : null;
+
+    if (!source || !target) {
+      await controlChannel.send('Please mention the current channel and the new channel. Usage: `move #old-channel #new-channel [--force]`');
+      return;
+    }
+
+    if (source.id === target.id) {
+      await controlChannel.send('Please mention two different channels to move between.');
+      return;
+    }
+
+    if (source.id === state.settings.ControlChannelID || target.id === state.settings.ControlChannelID) {
+      await controlChannel.send('The control channel cannot participate in moves. Choose two regular text channels.');
+      return;
+    }
+
+    if (source.guildId !== state.settings.GuildID || target.guildId !== state.settings.GuildID) {
+      await controlChannel.send('Please choose channels from the configured Discord server.');
+      return;
+    }
+
+    if (!['GUILD_TEXT', 'GUILD_NEWS'].includes(target.type)) {
+      await controlChannel.send('Only text or announcement channels can be targets. Please choose a different channel.');
+      return;
+    }
+
+    const sourceJidRaw = utils.discord.channelIdToJid(source.id);
+    const normalizedJid = utils.whatsapp.formatJid(sourceJidRaw);
+    if (!normalizedJid) {
+      await controlChannel.send('The source channel is not linked to any WhatsApp conversation.');
+      return;
+    }
+
+    const existingTargetJid = utils.discord.channelIdToJid(target.id);
+    const forcedTakeover = Boolean(existingTargetJid && existingTargetJid !== normalizedJid && force);
+    let displacedChat;
+    let displacedRun;
+    if (existingTargetJid && existingTargetJid !== normalizedJid) {
+      if (!force) {
+        await controlChannel.send('That destination channel is already linked to another conversation. Add `--force` to override it.');
+        return;
+      }
+      displacedChat = state.chats[existingTargetJid];
+      displacedRun = state.goccRuns[existingTargetJid];
+      delete state.chats[existingTargetJid];
+      delete state.goccRuns[existingTargetJid];
+    }
+
+    let webhook;
+    try {
+      const webhooks = await target.fetchWebhooks();
+      webhook = webhooks.find((hook) => hook.token && hook.owner?.id === client.user.id);
+      if (!webhook) {
+        webhook = await target.createWebhook('WA2DC');
+      }
+    } catch (err) {
+      state.logger?.error(err);
+      if (forcedTakeover) {
+        if (displacedChat) {
+          state.chats[existingTargetJid] = displacedChat;
+        }
+        if (displacedRun) {
+          state.goccRuns[existingTargetJid] = displacedRun;
+        }
+      }
+      await controlChannel.send('Failed to access or create a webhook for the destination channel. Check the bot\'s permissions.');
+      return;
+    }
+
+    const previousChat = state.chats[normalizedJid];
+    const previousRun = state.goccRuns[normalizedJid];
+    state.chats[normalizedJid] = {
+      id: webhook.id,
+      type: webhook.type,
+      token: webhook.token,
+      channelId: webhook.channelId,
+    };
+    delete state.goccRuns[normalizedJid];
+
+    try {
+      await utils.discord.getOrCreateChannel(normalizedJid);
+      await storage.save();
+    } catch (err) {
+      state.logger?.error(err);
+      if (previousChat) {
+        state.chats[normalizedJid] = previousChat;
+      } else {
+        delete state.chats[normalizedJid];
+      }
+      if (previousRun) {
+        state.goccRuns[normalizedJid] = previousRun;
+      } else {
+        delete state.goccRuns[normalizedJid];
+      }
+      if (forcedTakeover) {
+        if (displacedChat) {
+          state.chats[existingTargetJid] = displacedChat;
+        }
+        if (displacedRun) {
+          state.goccRuns[existingTargetJid] = displacedRun;
+        }
+      }
+      await controlChannel.send('Moved the channel, but failed to finalize the setup. Please try again.');
+      return;
+    }
+
+    if (previousChat?.channelId && previousChat.channelId !== webhook.channelId && previousChat.id) {
+      try {
+        const previousChannel = await utils.discord.getChannel(previousChat.channelId);
+        const previousWebhooks = await previousChannel?.fetchWebhooks();
+        const previousWebhook = previousWebhooks?.get(previousChat.id) || previousWebhooks?.find((hook) => hook.id === previousChat.id);
+        await previousWebhook?.delete('WA2DC channel moved');
+      } catch (err) {
+        state.logger?.warn(err);
+      }
+    }
+
+    const forcedSuffix = forcedTakeover
+      ? ` (overrode the previous link to \`${utils.whatsapp.jidToName(existingTargetJid)}\`).`
+      : '.';
+    await controlChannel.send(
+      `Moved \`${utils.whatsapp.jidToName(normalizedJid)}\` from ${source} to ${target}${forcedSuffix}`,
+    );
   },
   async list(_message, params) {
     let contacts = utils.whatsapp.contacts();
