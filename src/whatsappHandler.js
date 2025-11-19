@@ -101,7 +101,9 @@ const connectToWhatsApp = async (retry = 1) => {
         }
     });
     client.ev.on('creds.update', saveState);
-    ['chats.set', 'contacts.set', 'chats.upsert', 'chats.update', 'contacts.upsert', 'contacts.update', 'groups.upsert', 'groups.update'].forEach((eventName) => client.ev.on(eventName, utils.whatsapp.updateContacts));
+    const contactUpdater = utils.whatsapp.updateContacts.bind(utils.whatsapp);
+    ['chats.set', 'contacts.set', 'chats.upsert', 'chats.update', 'contacts.upsert', 'contacts.update', 'groups.upsert', 'groups.update']
+      .forEach((eventName) => client.ev.on(eventName, contactUpdater));
 
     client.ev.on('messages.upsert', async (update) => {
         if (['notify', 'append'].includes(update.type)) {
