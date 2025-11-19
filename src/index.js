@@ -14,7 +14,7 @@ if (!globalThis.crypto) {
 }
 
 (async () => {
-    const version = 'v1.1.35';
+    const version = 'v2.0.0-alpha.0';
   state.version = version;
   const streams = [
     { stream: pino.destination('logs.txt') },
