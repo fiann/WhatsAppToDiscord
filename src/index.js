@@ -1,16 +1,17 @@
-const nodeCrypto = require('crypto');
+import nodeCrypto from 'crypto';
+import pino from 'pino';
+import pretty from 'pino-pretty';
+import fs from 'fs';
+
+import discordHandler from './discordHandler.js';
+import state from './state.js';
+import utils from './utils.js';
+import storage from './storage.js';
+import whatsappHandler from './whatsappHandler.js';
+
 if (!globalThis.crypto) {
   globalThis.crypto = nodeCrypto.webcrypto;
 }
-const pino = require('pino');
-const pretty = require('pino-pretty');
-const fs = require('fs');
-
-const discordHandler =  require('./discordHandler.js');
-const state =  require('./state.js');
-const utils =  require('./utils.js');
-const storage = require('./storage.js');
-const whatsappHandler =  require('./whatsappHandler.js');
 
 (async () => {
     const version = 'v1.1.35';

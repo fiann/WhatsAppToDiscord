@@ -1,18 +1,48 @@
-const baileys = require('@whiskeysockets/baileys');
-const { DisconnectReason } = baileys;
+import makeWASocket, {
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  proto,
+  useMultiFileAuthState,
+  WAMessageStatus,
+  WAMessageStubType,
+} from '@whiskeysockets/baileys';
 
-const utils = require('./utils.js');
-const state = require("./state.js");
+import utils from './utils.js';
+import state from './state.js';
 
 
 let authState;
 let saveState;
 
+const migrateLegacyChats = async (client) => {
+    const store = client.signalRepository?.lidMapping;
+    if (!store) return;
+    const pnJids = Object.keys(state.chats).filter((jid) => jid.endsWith('@s.whatsapp.net'));
+    if (!pnJids.length) return;
+    try {
+        const mappings = typeof store.getLIDsForPNs === 'function'
+            ? await store.getLIDsForPNs(pnJids)
+            : {};
+        for (const pnJid of pnJids) {
+            let lidJid = mappings?.[pnJid];
+            if (!lidJid && typeof store.getLIDForPN === 'function') {
+                // eslint-disable-next-line no-await-in-loop
+                lidJid = await store.getLIDForPN(pnJid);
+            }
+            if (lidJid) {
+                utils.whatsapp.migrateLegacyJid(pnJid, lidJid);
+            }
+        }
+    } catch (err) {
+        state.logger?.warn({ err }, 'Failed to migrate PN chats to LIDs');
+    }
+};
+
 const connectToWhatsApp = async (retry = 1) => {
     const controlChannel = await utils.discord.getControlChannel();
-    const { version } = await baileys.fetchLatestBaileysVersion();
+    const { version } = await fetchLatestBaileysVersion();
 
-    const client = baileys.default({
+    const client = makeWASocket({
         version,
         printQRInTerminal: false,
         auth: authState,
@@ -64,6 +94,7 @@ const connectToWhatsApp = async (retry = 1) => {
                     state.contacts[jid] = data.subject;
                     client.contacts[jid] = data.subject;
                 }
+                await migrateLegacyChats(client);
             } catch (err) {
                 state.logger?.error(err);
             }
@@ -127,10 +158,12 @@ const connectToWhatsApp = async (retry = 1) => {
     client.ev.on('messages.delete', async (updates) => {
         const keys = 'keys' in updates ? updates.keys : updates;
         for (const key of keys) {
-            if (!utils.whatsapp.inWhitelist({ chatId: key.remoteJid })) continue;
+            if (!utils.whatsapp.inWhitelist({ key })) continue;
+            const jid = utils.whatsapp.getChannelJid({ key });
+            if (!jid) continue;
             state.dcClient.emit('whatsappDelete', {
                 id: key.id,
-                jid: utils.whatsapp.formatJid(key.remoteJid),
+                jid,
             });
         }
     });
@@ -138,23 +171,23 @@ const connectToWhatsApp = async (retry = 1) => {
     client.ev.on('messages.update', async (updates) => {
         for (const { update, key } of updates) {
             if (typeof update.status !== 'undefined' && key.fromMe &&
-                [baileys.WAMessageStatus.READ, baileys.WAMessageStatus.PLAYED].includes(update.status)) {
+                [WAMessageStatus.READ, WAMessageStatus.PLAYED].includes(update.status)) {
                 state.dcClient.emit('whatsappRead', {
                     id: key.id,
-                    jid: utils.whatsapp.formatJid(key.remoteJid),
+                    jid: utils.whatsapp.getChannelJid({ key }),
                 });
             }
 
             const protocol = update.message?.protocolMessage;
             const isDelete =
-                protocol?.type === baileys.proto.Message.ProtocolMessage.Type.REVOKE ||
-                update.messageStubType === baileys.WAMessageStubType.REVOKE;
+                protocol?.type === proto.Message.ProtocolMessage.Type.REVOKE ||
+                update.messageStubType === WAMessageStubType.REVOKE;
             if (!isDelete) continue;
             const msgKey = protocol?.key || key;
-            if (!utils.whatsapp.inWhitelist({ chatId: msgKey.remoteJid })) continue;
+            if (!utils.whatsapp.inWhitelist({ key: msgKey })) continue;
             state.dcClient.emit('whatsappDelete', {
                 id: msgKey.id,
-                jid: utils.whatsapp.formatJid(msgKey.remoteJid),
+                jid: utils.whatsapp.getChannelJid({ key: msgKey }),
             });
         }
     });
@@ -402,11 +435,11 @@ const connectToWhatsApp = async (retry = 1) => {
 
 const actions = {
     async start() {
-        const baileyState = await baileys.useMultiFileAuthState('./storage/baileys');
+        const baileyState = await useMultiFileAuthState('./storage/baileys');
         authState = baileyState.state;
         saveState = baileyState.saveCreds;
         state.waClient = await connectToWhatsApp();
     },
-}
+};
 
-module.exports = actions;
+export default actions;

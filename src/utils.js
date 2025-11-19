@@ -1,18 +1,20 @@
-const { Webhook, MessageAttachment } = require('discord.js');
-const { downloadMediaMessage, downloadContentFromMessage } = require('@whiskeysockets/baileys');
-const readline = require('readline');
-const QRCode = require('qrcode');
-const crypto = require('crypto');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const { pipeline } = require('stream/promises');
-const { pathToFileURL } = require('url');
-const http = require('http');
-const https = require('https');
-const child_process = require('child_process');
+import discordJs from 'discord.js';
+import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
+import readline from 'readline';
+import QRCode from 'qrcode';
+import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { pipeline } from 'stream/promises';
+import { pathToFileURL } from 'url';
+import http from 'http';
+import https from 'https';
+import childProcess from 'child_process';
 
-const state = require('./state.js');
+import state from './state.js';
+
+const { Webhook, MessageAttachment } = discordJs;
 
 const downloadTokens = new Map();
 
@@ -449,7 +451,7 @@ const sqliteToJson = {
     if (os.platform() !== 'win32') {
       exeName = './' + exeName;
     }
-    const child = child_process.spawnSync(exeName, [this._dbPath, '"SELECT * FROM WA2DC"'], { shell: true });
+    const child = childProcess.spawnSync(exeName, [this._dbPath, '"SELECT * FROM WA2DC"'], { shell: true });
 
     const rows = child.stdout.toString().trim().split('\n');
     for (let i = 0; i < rows.length; i++) {
@@ -541,19 +543,21 @@ const discord = {
   },
   _unfinishedGoccCalls: 0,
   async getOrCreateChannel(jid) {
-    if (state.goccRuns[jid]) { return state.goccRuns[jid]; }
+    const normalizedJid = whatsapp.formatJid(jid);
+    if (!normalizedJid) return null;
+    if (state.goccRuns[normalizedJid]) { return state.goccRuns[normalizedJid]; }
     let resolve;
-    state.goccRuns[jid] = new Promise((res) => {
+    state.goccRuns[normalizedJid] = new Promise((res) => {
       resolve = res;
     });
-    if (state.chats[jid]) {
-      const webhook = ensureWebhookReplySupport(new Webhook(state.dcClient, state.chats[jid]));
+    if (state.chats[normalizedJid]) {
+      const webhook = ensureWebhookReplySupport(new Webhook(state.dcClient, state.chats[normalizedJid]));
       resolve(webhook);
       return webhook;
     }
 
     this._unfinishedGoccCalls++;
-    const name = whatsapp.jidToName(jid);
+    const name = whatsapp.jidToName(normalizedJid);
     const channel = await this.createChannel(name).catch((err) => {
       if (err.code === 50035) {
         return this.createChannel('invalid-name');
@@ -561,7 +565,7 @@ const discord = {
       throw err;
     });
     const webhook = ensureWebhookReplySupport(await channel.createWebhook('WA2DC'));
-    state.chats[jid] = {
+    state.chats[normalizedJid] = {
       id: webhook.id,
       type: webhook.type,
       token: webhook.token,
@@ -815,6 +819,7 @@ const discord = {
     return await webhook.send(fallbackArgs);
   },
   async safeWebhookEdit(webhook, messageId, args, jid) {
+    const normalizedJid = whatsapp.formatJid(jid);
     try {
       return await webhook.editMessage(messageId, args);
     } catch (err) {
@@ -823,21 +828,26 @@ const discord = {
         return null;
       }
       if (err.code === 10015 && err.message.includes('Unknown Webhook')) {
-        delete state.goccRuns[jid];
-        const channel = await this.getChannel(state.chats[jid].channelId);
+        if (normalizedJid) {
+          delete state.goccRuns[normalizedJid];
+        }
+        const channel = await this.getChannel(state.chats[normalizedJid]?.channelId);
         webhook = ensureWebhookReplySupport(await channel.createWebhook('WA2DC'));
-        state.chats[jid] = {
-          id: webhook.id,
-          type: webhook.type,
-          token: webhook.token,
-          channelId: webhook.channelId,
-        };
+        if (normalizedJid) {
+          state.chats[normalizedJid] = {
+            id: webhook.id,
+            type: webhook.type,
+            token: webhook.token,
+            channelId: webhook.channelId,
+          };
+        }
         return await webhook.editMessage(messageId, args);
       }
       throw err;
     }
   },
   async safeWebhookDelete(webhook, messageId, jid) {
+    const normalizedJid = whatsapp.formatJid(jid);
     try {
       return await webhook.deleteMessage(messageId);
     } catch (err) {
@@ -846,15 +856,19 @@ const discord = {
         return null;
       }
       if (err.code === 10015 && err.message.includes('Unknown Webhook')) {
-        delete state.goccRuns[jid];
-        const channel = await this.getChannel(state.chats[jid].channelId);
+        if (normalizedJid) {
+          delete state.goccRuns[normalizedJid];
+        }
+        const channel = await this.getChannel(state.chats[normalizedJid]?.channelId);
         webhook = ensureWebhookReplySupport(await channel.createWebhook('WA2DC'));
-        state.chats[jid] = {
-          id: webhook.id,
-          type: webhook.type,
-          token: webhook.token,
-          channelId: webhook.channelId,
-        };
+        if (normalizedJid) {
+          state.chats[normalizedJid] = {
+            id: webhook.id,
+            type: webhook.type,
+            token: webhook.token,
+            channelId: webhook.channelId,
+          };
+        }
         return await webhook.deleteMessage(messageId);
       }
       throw err;
@@ -1020,11 +1034,64 @@ const discord = {
 };
 
 const whatsapp = {
-  jidToPhone(jid) {
-    return jid.split(':')[0].split('@')[0];
+  jidToPhone(jid = '') {
+    if (!jid) return '';
+    return String(jid).split(':')[0].split('@')[0];
   },
   formatJid(jid) {
-    return `${this.jidToPhone(jid)}@${jid.split('@')[1]}`;
+    if (!jid) return null;
+    const [userPart, serverPart] = String(jid).split('@');
+    if (!serverPart) return String(jid);
+    const cleanUser = userPart.split(':')[0];
+    return `${cleanUser}@${serverPart}`;
+  },
+  migrateLegacyJid(oldJid, newJid) {
+    const legacy = this.formatJid(oldJid);
+    const fresh = this.formatJid(newJid);
+    if (!legacy || !fresh || legacy === fresh) return;
+    const migrateKey = (container) => {
+      if (!container || !Object.prototype.hasOwnProperty.call(container, legacy)) return;
+      if (!Object.prototype.hasOwnProperty.call(container, fresh)) {
+        container[fresh] = container[legacy];
+      }
+      delete container[legacy];
+    };
+    migrateKey(state.chats);
+    migrateKey(state.contacts);
+    migrateKey(state.goccRuns);
+    const whitelist = state.settings?.Whitelist;
+    if (Array.isArray(whitelist) && whitelist.length) {
+      const normalized = whitelist.map((jid) => {
+        const formatted = this.formatJid(jid);
+        return formatted === legacy ? fresh : formatted;
+      });
+      state.settings.Whitelist = [...new Set(normalized.filter(Boolean))];
+    }
+  },
+  resolveKnownJid(...candidates) {
+    const flat = candidates.flat().filter(Boolean);
+    for (const jid of flat) {
+      if (state.chats[jid]) return jid;
+    }
+    for (const jid of flat) {
+      if (state.contacts[jid]) return jid;
+    }
+    return flat.find(Boolean) || null;
+  },
+  getChatJidCandidates(rawMsg = {}) {
+    const { key = {} } = rawMsg;
+    const remoteJid = this.formatJid(
+      key.remoteJid
+      || rawMsg.chatId
+      || rawMsg.attrs?.from
+      || rawMsg.from
+      || rawMsg.jid,
+    );
+    const remoteJidAlt = this.formatJid(key.remoteJidAlt || rawMsg.remoteJidAlt);
+    const candidates = [];
+    if (remoteJid) candidates.push(remoteJid);
+    if (remoteJidAlt && !candidates.includes(remoteJidAlt)) candidates.push(remoteJidAlt);
+    return candidates;
   },
   isMe(myJID, jid) {
     return jid.startsWith(this.jidToPhone(myJID)) && !jid.endsWith('@g.us');
@@ -1034,9 +1101,18 @@ const whatsapp = {
     return state.waClient.contacts[this.formatJid(jid)] || pushName || this.jidToPhone(jid);
   },
   toJid(name) {
+    if (!name) return null;
+    const trimmed = String(name).trim();
     // eslint-disable-next-line no-restricted-globals
-    if (!isNaN(name)) { return `${name}@s.whatsapp.net`; }
-    return Object.keys(state.waClient.contacts).find((key) => state.waClient.contacts[key].toLowerCase().trim() === name.toLowerCase().trim());
+    if (!isNaN(trimmed)) { return this.formatJid(`${trimmed}@s.whatsapp.net`); }
+    if (trimmed.includes('@')) {
+      return this.formatJid(trimmed);
+    }
+    const normalized = trimmed.toLowerCase();
+    const match = Object.keys(state.waClient.contacts)
+      .find((key) => state.waClient.contacts[key]
+        && state.waClient.contacts[key].toLowerCase().trim() === normalized);
+    return this.formatJid(match);
   },
   contacts() {
     return Object.values(state.waClient.contacts);
@@ -1070,33 +1146,24 @@ const whatsapp = {
       .send({ files: [new MessageAttachment(await QRCode.toBuffer(qrString), 'qrcode.png')] });
   },
   getChannelJid(rawMsg) {
-    const rawJid = rawMsg?.key?.remoteJid
-      || rawMsg?.chatId
-      || rawMsg?.attrs?.from
-      || rawMsg?.from
-      || rawMsg?.jid;
-
-    if (!rawJid) return null;
-
-    const formattedJid = this.formatJid(rawJid);
-    if (!formattedJid) return formattedJid;
-
-    if (state.chats[formattedJid]) {
-      return formattedJid;
+    const [primary, alternate] = this.getChatJidCandidates(rawMsg);
+    if (primary && alternate) {
+      this.migrateLegacyJid(alternate, primary);
     }
-
-    const phone = this.jidToPhone(formattedJid);
-    for (const existingJid of Object.keys(state.chats)) {
-      if (this.jidToPhone(existingJid) === phone) {
-        return existingJid;
-      }
-    }
-
-    return formattedJid;
+    return this.resolveKnownJid(primary, alternate);
   },
   getSenderJid(rawMsg, fromMe) {
     if (fromMe) { return this.formatJid(state.waClient.user.id); }
-    return this.formatJid(rawMsg?.key?.participant || rawMsg?.key?.remoteJid || rawMsg?.chatId || rawMsg?.jid);
+    const { key = {} } = rawMsg || {};
+    const participant = this.formatJid(key.participant || rawMsg?.participant);
+    const participantAlt = this.formatJid(key.participantAlt || rawMsg?.participantAlt || key.remoteJidAlt);
+    if (participant && participantAlt) {
+      this.migrateLegacyJid(participantAlt, participant);
+    }
+    const resolved = this.resolveKnownJid(participant, participantAlt);
+    if (resolved) return resolved;
+    const [chatJid] = this.getChatJidCandidates(rawMsg);
+    return chatJid;
   },
   getSenderName(rawMsg) {
     return this.jidToName(this.getSenderJid(rawMsg, rawMsg.key.fromMe), rawMsg.pushName);
@@ -1126,12 +1193,16 @@ const whatsapp = {
     const content = this.getContent(message, nMsgType, qMsgType);
     let file = null;
     if (qMsgType && context?.stanzaId) {
+      const quoteParticipant = this.formatJid(context?.participant || context?.participantAlt);
+      if (context?.participant && context?.participantAlt) {
+        this.migrateLegacyJid(context.participantAlt, context.participant);
+      }
       const downloadCtx = {
         key: {
-          remoteJid: rawMsg.key.remoteJid,
+          remoteJid: this.getChannelJid(rawMsg) || rawMsg.key.remoteJid,
           id: context.stanzaId,
           fromMe: rawMsg.key.fromMe,
-          participant: context.participant,
+          participant: quoteParticipant,
         },
         message: qMsg,
       };
@@ -1139,7 +1210,7 @@ const whatsapp = {
     }
 
     const quote = {
-      name: this.jidToName(context?.participant || ''),
+      name: this.jidToName(this.resolveKnownJid(context?.participant, context?.participantAlt) || ''),
       content,
       file,
     };
@@ -1214,7 +1285,11 @@ const whatsapp = {
     }
   },
   inWhitelist(rawMsg) {
-    return state.settings.Whitelist.length === 0 || state.settings.Whitelist.includes(rawMsg?.key?.remoteJid || rawMsg.chatId);
+    const whitelist = state.settings.Whitelist || [];
+    if (!whitelist.length) return true;
+    const normalized = whitelist.map((jid) => this.formatJid(jid)).filter(Boolean);
+    const candidates = this.getChatJidCandidates(rawMsg);
+    return candidates.some((jid) => normalized.includes(jid));
   },
   getTimestamp(rawMsg) {
     if (rawMsg?.messageTimestamp) return rawMsg.messageTimestamp;
@@ -1279,11 +1354,22 @@ const whatsapp = {
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;
     for (const contact of contacts) {
-      const name = contact.name || contact.subject;
-      if (name) {
-        state.waClient.contacts[contact.id] = name;
-        state.contacts[contact.id] = name;
+      const name = contact?.name || contact?.subject;
+      if (!name) continue;
+      const preferredId = this.formatJid(contact?.id);
+      let alternateId = null;
+      if (contact?.phoneNumber) {
+        alternateId = this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`);
+      } else if (contact?.lid) {
+        alternateId = this.formatJid(contact.lid);
       }
+      if (preferredId && alternateId) {
+        this.migrateLegacyJid(alternateId, preferredId);
+      }
+      const targetId = preferredId || alternateId;
+      if (!targetId) continue;
+      state.waClient.contacts[targetId] = name;
+      state.contacts[targetId] = name;
     }
   },
   createDocumentContent(attachment) {
@@ -1397,7 +1483,7 @@ const ui = {
   },
 };
 
-module.exports = {
+const utils = {
   updater,
   discord,
   whatsapp,
@@ -1405,3 +1491,5 @@ module.exports = {
   ensureDownloadServer,
   stopDownloadServer,
 };
+
+export default utils;

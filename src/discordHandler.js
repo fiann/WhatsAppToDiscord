@@ -1,9 +1,11 @@
-const { Client, Intents } = require('discord.js');
+import discordJs from 'discord.js';
+import fs from 'fs';
 
-const fs = require('fs');
-const state = require('./state.js');
-const utils = require('./utils.js');
-const storage = require('./storage.js');
+import state from './state.js';
+import utils from './utils.js';
+import storage from './storage.js';
+
+const { Client, Intents } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 
@@ -420,7 +422,10 @@ const commands = {
     await utils.discord.getOrCreateChannel(jid);
 
     if (state.settings.Whitelist.length) {
-      state.settings.Whitelist.push(jid);
+      const normalized = utils.whatsapp.formatJid(jid);
+      if (normalized && !state.settings.Whitelist.includes(normalized)) {
+        state.settings.Whitelist.push(normalized);
+      }
     }
   },
   async link(message, params) {
@@ -457,13 +462,14 @@ const commands = {
 
     const jidQuery = contactTokens.join(' ');
     const jid = utils.whatsapp.toJid(jidQuery);
-    if (!jid) {
+    const normalizedJid = utils.whatsapp.formatJid(jid);
+    if (!normalizedJid) {
       await controlChannel.send(`Couldn't find \`${jidQuery}\`.`);
       return;
     }
 
     const existingJid = utils.discord.channelIdToJid(channel.id);
-    if (existingJid && existingJid !== jid) {
+    if (existingJid && existingJid !== normalizedJid) {
       await controlChannel.send('That channel is already linked to another WhatsApp conversation.');
       return;
     }
@@ -481,31 +487,31 @@ const commands = {
       return;
     }
 
-    const previousChat = state.chats[jid];
+    const previousChat = state.chats[normalizedJid];
     const previousChannelId = previousChat?.channelId;
-    const previousRun = state.goccRuns[jid];
-    state.chats[jid] = {
+    const previousRun = state.goccRuns[normalizedJid];
+    state.chats[normalizedJid] = {
       id: webhook.id,
       type: webhook.type,
       token: webhook.token,
       channelId: webhook.channelId,
     };
-    delete state.goccRuns[jid];
+    delete state.goccRuns[normalizedJid];
 
     try {
-      await utils.discord.getOrCreateChannel(jid);
+      await utils.discord.getOrCreateChannel(normalizedJid);
       await storage.save();
     } catch (err) {
       state.logger?.error(err);
       if (previousChat) {
-        state.chats[jid] = previousChat;
+        state.chats[normalizedJid] = previousChat;
       } else {
-        delete state.chats[jid];
+        delete state.chats[normalizedJid];
       }
       if (previousRun) {
-        state.goccRuns[jid] = previousRun;
+        state.goccRuns[normalizedJid] = previousRun;
       } else {
-        delete state.goccRuns[jid];
+        delete state.goccRuns[normalizedJid];
       }
       await controlChannel.send('Linked the channel, but failed to finalize the setup. Please try again.');
       return;
@@ -522,7 +528,7 @@ const commands = {
       }
     }
 
-    await controlChannel.send(`Linked ${channel} with \`${utils.whatsapp.jidToName(jid)}\`.`);
+    await controlChannel.send(`Linked ${channel} with \`${utils.whatsapp.jidToName(normalizedJid)}\`.`);
   },
   async list(_message, params) {
     let contacts = utils.whatsapp.contacts();
@@ -551,7 +557,10 @@ const commands = {
       return;
     }
 
-    state.settings.Whitelist.push(jid);
+    const normalized = utils.whatsapp.formatJid(jid);
+    if (normalized && !state.settings.Whitelist.includes(normalized)) {
+      state.settings.Whitelist.push(normalized);
+    }
     await controlChannel.send('Added to the whitelist!');
   },
   async removefromwhitelist(message, params) {
@@ -567,7 +576,8 @@ const commands = {
       return;
     }
 
-    state.settings.Whitelist = state.settings.Whitelist.filter((el) => el !== jid);
+    const normalized = utils.whatsapp.formatJid(jid);
+    state.settings.Whitelist = state.settings.Whitelist.filter((el) => el !== normalized);
     await controlChannel.send('Removed from the whitelist!');
   },
   async listwhitelist() {
@@ -1010,10 +1020,12 @@ client.on('messageReactionRemove', async (reaction, user) => {
   state.waClient.ev.emit('discordReaction', { jid, reaction, removed: true });
 });
 
-module.exports = {
+const discordHandler = {
   start: async () => {
     await client.login(state.settings.Token);
     return client;
   },
   setControlChannel,
 };
+
+export default discordHandler;

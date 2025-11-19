@@ -1,9 +1,11 @@
-const readline = require('readline');
-const fs = require('fs/promises');
-const path = require('path');
-const { Client, Intents } = require('discord.js');
+import readline from 'readline';
+import fs from 'fs/promises';
+import path from 'path';
+import discordJs from 'discord.js';
 
-const state = require('./state.js');
+import state from './state.js';
+
+const { Client, Intents } = discordJs;
 
 const bidirectionalMap = (capacity, data = {}) => {
   const keys = Object.keys(data);
@@ -136,4 +138,4 @@ const setup = {
   },
 };
 
-module.exports = storage;
+export default storage;

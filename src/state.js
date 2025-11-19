@@ -1,4 +1,4 @@
-module.exports = {
+const state = {
   settings: {
     Whitelist: [],
     DiscordPrefixText: null,
@@ -57,3 +57,5 @@ module.exports = {
   updateInfo: null,
   version: '',
 };
+
+export default state;
