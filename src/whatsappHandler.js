@@ -14,6 +14,27 @@ import state from './state.js';
 let authState;
 let saveState;
 
+const ensureTcTokenSupport = async (keyStore) => {
+    if (!keyStore?.set) {
+        return;
+    }
+    const probeId = '__wa2dc_tctoken_probe__';
+    try {
+        await keyStore.set({
+            tctoken: {
+                [probeId]: Buffer.alloc(0),
+            },
+        });
+        await keyStore.set({
+            tctoken: {
+                [probeId]: null,
+            },
+        });
+    } catch (err) {
+        state.logger?.warn({ err }, 'Failed to probe tctoken auth store support');
+    }
+};
+
 const migrateLegacyChats = async (client) => {
     const store = client.signalRepository?.lidMapping;
     if (!store) return;
@@ -438,6 +459,7 @@ const connectToWhatsApp = async (retry = 1) => {
 const actions = {
     async start() {
         const baileyState = await useMultiFileAuthState('./storage/baileys');
+        await ensureTcTokenSupport(baileyState.state?.keys);
         authState = baileyState.state;
         saveState = baileyState.saveCreds;
         state.waClient = await connectToWhatsApp();
