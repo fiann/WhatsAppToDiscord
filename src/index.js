@@ -141,7 +141,8 @@ if (!globalThis.crypto) {
 
   if (state.updateInfo) {
     const ctrl = await utils.discord.getControlChannel();
-    await ctrl?.send(
+    await utils.discord.sendPartitioned(
+      ctrl,
       `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
       `See ${state.updateInfo.url}\n` +
       `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`
@@ -152,7 +153,8 @@ if (!globalThis.crypto) {
     await utils.updater.run(version, { prompt: false });
     if (state.updateInfo) {
       const ch = await utils.discord.getControlChannel();
-      await ch?.send(
+      await utils.discord.sendPartitioned(
+        ch,
         `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
         `See ${state.updateInfo.url}\n` +
         `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`

@@ -484,6 +484,14 @@ const discord = {
   partitionText(text) {
     return text.match(/(.|[\r\n]){1,2000}/g) || [];
   },
+  async sendPartitioned(channel, text) {
+    if (!channel || !text) return;
+    const parts = this.partitionText(text);
+    for (const part of parts) {
+      // eslint-disable-next-line no-await-in-loop
+      await channel.send(part);
+    }
+  },
   convertWhatsappFormatting(text = '') {
     if (!text) return text;
     let converted = text;

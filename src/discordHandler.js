@@ -1005,7 +1005,8 @@ const commands = {
   async checkupdate() {
     await utils.updater.run(state.version, { prompt: false });
     if (state.updateInfo) {
-      await controlChannel.send(
+      await utils.discord.sendPartitioned(
+        controlChannel,
         `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
         `See ${state.updateInfo.url}\n` +
         `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`
