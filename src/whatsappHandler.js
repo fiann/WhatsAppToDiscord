@@ -14,24 +14,25 @@ import state from './state.js';
 let authState;
 let saveState;
 
-const ensureTcTokenSupport = async (keyStore) => {
-    if (!keyStore?.set) {
+const ensureSignalStoreSupport = async (keyStore) => {
+    if (!keyStore?.get || !keyStore?.set) {
         return;
     }
-    const probeId = '__wa2dc_tctoken_probe__';
-    try {
-        await keyStore.set({
-            tctoken: {
-                [probeId]: Buffer.alloc(0),
-            },
-        });
-        await keyStore.set({
-            tctoken: {
-                [probeId]: null,
-            },
-        });
-    } catch (err) {
-        state.logger?.warn({ err }, 'Failed to probe tctoken auth store support');
+
+    const requiredKeys = ['tctoken', 'lid-mapping', 'device-list', 'device-index'];
+    for (const key of requiredKeys) {
+        try {
+            // Baileys expects a map for each category; ensure the file exists so new
+            // rc.8+ entries (like tctoken and lid-mapping) can be written safely.
+            // eslint-disable-next-line no-await-in-loop
+            const existing = await keyStore.get(key, []);
+            if (existing == null) {
+                // eslint-disable-next-line no-await-in-loop
+                await keyStore.set({ [key]: {} });
+            }
+        } catch (err) {
+            state.logger?.warn({ err, key }, 'Failed to ensure auth store compatibility');
+        }
     }
 };
 
@@ -459,7 +460,7 @@ const connectToWhatsApp = async (retry = 1) => {
 const actions = {
     async start() {
         const baileyState = await useMultiFileAuthState('./storage/baileys');
-        await ensureTcTokenSupport(baileyState.state?.keys);
+        await ensureSignalStoreSupport(baileyState.state?.keys);
         authState = baileyState.state;
         saveState = baileyState.saveCreds;
         state.waClient = await connectToWhatsApp();
