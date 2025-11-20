@@ -1,8 +1,12 @@
-const { fork } = require('child_process');
-const path = require('path');
-const pino = require('pino');
-const pretty = require('pino-pretty');
-const fs = require('fs');
+import { fork } from 'child_process';
+import path from 'path';
+import pino from 'pino';
+import pretty from 'pino-pretty';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const logger = pino({}, pino.multistream([
   { stream: pino.destination('logs.txt') },

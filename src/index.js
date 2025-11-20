@@ -1,19 +1,20 @@
-const nodeCrypto = require('crypto');
+import nodeCrypto from 'crypto';
+import pino from 'pino';
+import pretty from 'pino-pretty';
+import fs from 'fs';
+
+import discordHandler from './discordHandler.js';
+import state from './state.js';
+import utils from './utils.js';
+import storage from './storage.js';
+import whatsappHandler from './whatsappHandler.js';
+
 if (!globalThis.crypto) {
   globalThis.crypto = nodeCrypto.webcrypto;
 }
-const pino = require('pino');
-const pretty = require('pino-pretty');
-const fs = require('fs');
-
-const discordHandler =  require('./discordHandler.js');
-const state =  require('./state.js');
-const utils =  require('./utils.js');
-const storage = require('./storage.js');
-const whatsappHandler =  require('./whatsappHandler.js');
 
 (async () => {
-    const version = 'v1.1.35';
+    const version = 'v2.0.0-alpha.0';
   state.version = version;
   const streams = [
     { stream: pino.destination('logs.txt') },
@@ -140,7 +141,8 @@ const whatsappHandler =  require('./whatsappHandler.js');
 
   if (state.updateInfo) {
     const ctrl = await utils.discord.getControlChannel();
-    await ctrl?.send(
+    await utils.discord.sendPartitioned(
+      ctrl,
       `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
       `See ${state.updateInfo.url}\n` +
       `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`
@@ -151,7 +153,8 @@ const whatsappHandler =  require('./whatsappHandler.js');
     await utils.updater.run(version, { prompt: false });
     if (state.updateInfo) {
       const ch = await utils.discord.getControlChannel();
-      await ch?.send(
+      await utils.discord.sendPartitioned(
+        ch,
         `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
         `See ${state.updateInfo.url}\n` +
         `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`

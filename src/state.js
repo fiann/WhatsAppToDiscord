@@ -1,4 +1,4 @@
-module.exports = {
+const state = {
   settings: {
     Whitelist: [],
     DiscordPrefixText: null,
@@ -57,3 +57,20 @@ module.exports = {
   updateInfo: null,
   version: '',
 };
+
+export const settings = state.settings;
+export const dcClient = () => state.dcClient;
+export const waClient = () => state.waClient;
+export const chats = state.chats;
+export const contacts = state.contacts;
+export const startTime = () => state.startTime;
+export const logger = () => state.logger;
+export const lastMessages = () => state.lastMessages;
+export const sentMessages = state.sentMessages;
+export const reactions = state.reactions;
+export const sentReactions = state.sentReactions;
+export const goccRuns = state.goccRuns;
+export const updateInfo = () => state.updateInfo;
+export const version = () => state.version;
+
+export default state;

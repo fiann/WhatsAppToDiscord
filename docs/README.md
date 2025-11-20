@@ -4,6 +4,8 @@ WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Di
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by [arespawn](https://github.com/arespawn).
 
+> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.0` introduces the Baileys 7 migration and is **not yet stable**. Expect rapid updates and potential breaking changes until a stable release lands.
+
 ## Requirements
 
 - Node.js 20 or higher
@@ -36,6 +38,10 @@ docker compose up -d
 ```
 
 The compose file mounts the `storage` directory so data is kept between container restarts.
+
+## Troubleshooting
+
+- **Duplicate Discord channels after the LID migration** – If a conversation suddenly starts flowing into a brand-new Discord channel, re-link it back to the original room via the control channel (`link --force <contact> #old-channel`) rather than editing files on disk. The bot will create a webhook inside the existing channel, clean up the stray webhook, and update its saved metadata. If you prefer to move the webhook that already exists in the duplicate channel, run `move #duplicate-channel #old-channel --force` so the bot reuses that webhook and deletes the redundant channel mapping for you.
 
 ## Setup
 
