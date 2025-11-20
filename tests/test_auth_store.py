@@ -5,7 +5,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def ensure_node_deps():
+    baileys_path = ROOT / "node_modules" / "@whiskeysockets" / "baileys"
+    if baileys_path.exists():
+        return
+
+    subprocess.run(
+        ["npm", "ci", "--ignore-scripts", "--omit=dev"],
+        check=True,
+        cwd=ROOT,
+    )
+
+
 def node_eval(code: str) -> str:
+    ensure_node_deps()
     result = subprocess.run(
         ["node", "-e", code],
         capture_output=True,
