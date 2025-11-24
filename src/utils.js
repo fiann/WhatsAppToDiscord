@@ -1422,7 +1422,11 @@ const whatsapp = {
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;
     for (const contact of contacts) {
-      const name = contact?.name || contact?.subject;
+      const name = contact?.name
+        || contact?.subject
+        || contact?.verifiedName
+        || contact?.notify
+        || contact?.pushName;
       if (!name) continue;
       const preferredId = this.formatJid(contact?.id);
       let alternateId = null;
