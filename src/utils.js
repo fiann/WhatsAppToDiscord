@@ -1001,17 +1001,40 @@ const discord = {
   async downloadLargeFile(file) {
     await fs.promises.mkdir(state.settings.DownloadDir, { recursive: true });
     const [absPath, fileName] = await this.findAvailableName(state.settings.DownloadDir, file.name);
-    if (typeof file.attachment?.pipe === 'function') {
-      await pipeline(file.attachment, fs.createWriteStream(absPath));
-    } else if (file.downloadCtx) {
+    const writeFromDownloadCtx = async () => {
       const stream = await downloadContentFromMessage(
         file.downloadCtx.message[file.msgType],
         file.msgType.replace('Message', ''),
         { logger: state.logger, reuploadRequest: state.waClient.updateMediaMessage },
       );
       await pipeline(stream, fs.createWriteStream(absPath));
-    } else {
-      await fs.promises.writeFile(absPath, file.attachment);
+    };
+
+    try {
+      if (typeof file.attachment?.pipe === 'function') {
+        await pipeline(file.attachment, fs.createWriteStream(absPath));
+      } else if (file.downloadCtx) {
+        await writeFromDownloadCtx();
+      } else {
+        await fs.promises.writeFile(absPath, file.attachment);
+      }
+    } catch (err) {
+      // Retry once for transient network errors when we can recreate the stream.
+      const canRetry = !!file.downloadCtx;
+      if (canRetry) {
+        state.logger?.warn({ err, file: file.name }, 'Retrying WhatsApp media download after failure');
+        try {
+          await writeFromDownloadCtx();
+        } catch (retryErr) {
+          state.logger?.error({ err: retryErr, file: file.name }, 'Failed to download WhatsApp media after retry');
+          await fs.promises.rm(absPath, { force: true }).catch(() => {});
+          return '\nWA2DC Attention: Failed to download attachment from WhatsApp. Please check WhatsApp or try again.';
+        }
+      } else {
+        state.logger?.error({ err, file: file.name }, 'Failed to download WhatsApp media');
+        await fs.promises.rm(absPath, { force: true }).catch(() => {});
+        return '\nWA2DC Attention: Failed to download attachment from WhatsApp. Please check WhatsApp or try again.';
+      }
     }
     await this.pruneDownloadsDir(absPath);
     ensureDownloadServer();

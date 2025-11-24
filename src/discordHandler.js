@@ -167,7 +167,11 @@ const flushAlbum = async (key) => {
   if (!album) return;
   clearTimeout(album.timer);
   delete pendingAlbums[key];
-  await sendWhatsappMessage(album.message, album.files, album.ids);
+  try {
+    await sendWhatsappMessage(album.message, album.files, album.ids);
+  } catch (err) {
+    state.logger?.error({ err }, 'Failed to forward WhatsApp album to Discord');
+  }
 };
 
 const setControlChannel = async () => {
@@ -210,31 +214,34 @@ client.on('whatsappMessage', async (message) => {
   if ((state.settings.oneWay >> 0 & 1) === 0) {
     return;
   }
+  try {
+    const key = `${message.channelJid}:${message.name}`;
 
-  const key = `${message.channelJid}:${message.name}`;
-
-  if (message.file && !message.isEdit) {
-    if (pendingAlbums[key]) {
-      pendingAlbums[key].files.push(message.file);
-      pendingAlbums[key].ids.push(message.id);
-      clearTimeout(pendingAlbums[key].timer);
-      pendingAlbums[key].timer = setTimeout(() => flushAlbum(key), 500);
+    if (message.file && !message.isEdit) {
+      if (pendingAlbums[key]) {
+        pendingAlbums[key].files.push(message.file);
+        pendingAlbums[key].ids.push(message.id);
+        clearTimeout(pendingAlbums[key].timer);
+        pendingAlbums[key].timer = setTimeout(() => flushAlbum(key), 500);
+        return;
+      }
+      pendingAlbums[key] = {
+        message,
+        files: [message.file],
+        ids: [message.id],
+        timer: setTimeout(() => flushAlbum(key), 500),
+      };
       return;
     }
-    pendingAlbums[key] = {
-      message,
-      files: [message.file],
-      ids: [message.id],
-      timer: setTimeout(() => flushAlbum(key), 500),
-    };
-    return;
-  }
 
-  if (pendingAlbums[key]) {
-    await flushAlbum(key);
-  }
+    if (pendingAlbums[key]) {
+      await flushAlbum(key);
+    }
 
-  await sendWhatsappMessage(message, message.file ? [message.file] : []);
+    await sendWhatsappMessage(message, message.file ? [message.file] : []);
+  } catch (err) {
+    state.logger?.error({ err }, 'Failed to process incoming WhatsApp message');
+  }
 });
 
 client.on('whatsappReaction', async (reaction) => {
