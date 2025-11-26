@@ -1,5 +1,5 @@
 import discordJs from 'discord.js';
-import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, downloadContentFromMessage, proto } from '@whiskeysockets/baileys';
 import readline from 'readline';
 import QRCode from 'qrcode';
 import crypto from 'crypto';
@@ -1491,6 +1491,63 @@ const whatsapp = {
     for (let file of files) {
       fs.unlinkSync(path.join(dir, file));
     }
+  },
+
+  async _listAppStateKeyIds() {
+    const dir = './storage/baileys';
+    const files = await fs.promises.readdir(dir).catch(() => []);
+    return files
+      .filter((file) => file.startsWith('app-state-sync-key-') && file.endsWith('.json'))
+      .map((file) => file.replace(/^app-state-sync-key-/, '').replace(/\.json$/, '').replace(/__/g, '/'));
+  },
+
+  async resetAppStateSync(hard = false) {
+    const client = state.waClient;
+    const keyStore = client?.authState?.keys;
+    if (!client || !keyStore?.set) {
+      return { clearedKeys: 0 };
+    }
+
+    const patchNames = ['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'];
+    const versionResets = Object.fromEntries(patchNames.map((name) => [name, null]));
+    const updates = { 'app-state-sync-version': versionResets };
+
+    let keyIds = [];
+    if (hard) {
+      keyIds = await this._listAppStateKeyIds();
+      const currentKeyId = client?.authState?.creds?.myAppStateKeyId;
+      if (currentKeyId && !keyIds.includes(currentKeyId)) {
+        keyIds.push(currentKeyId);
+      }
+      if (keyIds.length) {
+        updates['app-state-sync-key'] = Object.fromEntries(keyIds.map((id) => [id, null]));
+      }
+    }
+
+    await keyStore.set(updates);
+    await keyStore.clear?.();
+
+    if (hard && keyIds.length) {
+      try {
+        const messageId = typeof client.generateMessageTag === 'function'
+          ? client.generateMessageTag()
+          : Date.now().toString();
+        await client.relayMessage(client.user.id, {
+          protocolMessage: {
+            type: proto.Message.ProtocolMessage.Type.APP_STATE_SYNC_KEY_REQUEST,
+            appStateSyncKeyRequest: {
+              keyIds: keyIds.map((id) => ({ keyId: Buffer.from(id, 'base64') })),
+            },
+          },
+        }, { messageId });
+        state.logger?.info({ keyIds }, 'Requested fresh app state sync keys');
+      } catch (err) {
+        state.logger?.warn({ err }, 'Failed to request app state sync keys after clearing them');
+      }
+    }
+
+    await client.resyncAppState(patchNames);
+    return { clearedKeys: keyIds.length };
   }
 };
 
