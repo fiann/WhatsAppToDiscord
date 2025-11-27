@@ -10,4 +10,3 @@ build/
 storage/
 out.js
 .env
-.DS_Store

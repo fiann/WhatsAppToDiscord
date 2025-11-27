@@ -827,27 +827,19 @@ const commands = {
     await controlChannel.send('See all the available commands at https://arespawn.github.io/WhatsAppToDiscord/#/commands');
   },
   async resync(_message, params) {
-    const hard = params.includes('hard') || params.includes('reset');
-    try {
-      const { clearedKeys } = await utils.whatsapp.resetAppStateSync(hard);
-      for (const [jid, attributes] of Object.entries(await state.waClient.groupFetchAllParticipating())) {
-        state.waClient.contacts[jid] = attributes.subject;
+    await state.waClient.authState.keys.set({
+      'app-state-sync-version': { critical_unblock_low: null },
+    });
+    await state.waClient.resyncAppState(['critical_unblock_low']);
+    for (const [jid, attributes] of Object.entries(await state.waClient.groupFetchAllParticipating())) { state.waClient.contacts[jid] = attributes.subject; }
+    if (params.includes('rename')) {
+      try {
+        await utils.discord.renameChannels();
+      } catch (err) {
+        state.logger?.error(err);
       }
-      if (params.includes('rename')) {
-        try {
-          await utils.discord.renameChannels();
-        } catch (err) {
-          state.logger?.error(err);
-        }
-      }
-      const suffix = hard
-        ? ` (cleared ${clearedKeys} app state key${clearedKeys === 1 ? '' : 's'} and requested fresh keys)`
-        : '';
-      await controlChannel.send(`Re-synced${suffix}!`);
-    } catch (err) {
-      state.logger?.error(err);
-      await controlChannel.send('Re-sync failed, check logs for details.');
     }
+    await controlChannel.send('Re-synced!');
   },
   async enablelocaldownloads() {
     state.settings.LocalDownloads = true;
