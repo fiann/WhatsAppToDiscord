@@ -1,5 +1,5 @@
 # Commands
-You can use the following commands only in `#control-room` created by the bot. Note that all the commands are case-insensitive. So, `list`, `LIST`, and `lIsT` would evaluate the same way.
+All commands are now available as slash commands anywhere in your server. Responses are ephemeral outside `#control-room`, but they post publicly when used inside the control room. Legacy text commands in `#control-room` still work for compatibility. Use Discord integration permissions to manage who can run these commands.
 
 ## pairWithCode
 Pairing with your phone number
