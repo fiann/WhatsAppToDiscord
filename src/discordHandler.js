@@ -21,7 +21,6 @@ let controlChannel;
 let slashRegisterWarned = false;
 const pendingAlbums = {};
 const typingTimeouts = {};
-const whatsappTypingLoops = new Map();
 const deliveredMessages = new Set();
 const FORCE_TOKENS = new Set(['--force', '-f']);
 const BOT_PERMISSIONS = 536879120;
@@ -394,34 +393,10 @@ client.on('whatsappReaction', async (reaction) => {
 
 client.on('whatsappTyping', async ({ jid, isTyping }) => {
   if ((state.settings.oneWay >> 0 & 1) === 0) { return; }
-  const stopTypingLoop = () => {
-    const existing = whatsappTypingLoops.get(jid);
-    if (existing) {
-      clearTimeout(existing);
-      whatsappTypingLoops.delete(jid);
-    }
-  };
   const channelId = state.chats[jid]?.channelId;
-  if (!channelId) {
-    stopTypingLoop();
-    return;
-  }
+  if (!channelId || !isTyping) { return; }
   const channel = await utils.discord.getChannel(channelId);
-  if (!channel) {
-    stopTypingLoop();
-    return;
-  }
-  if (!isTyping) {
-    stopTypingLoop();
-    return;
-  }
-  stopTypingLoop();
-  const runTypingLoop = () => {
-    channel.sendTyping().catch(() => {});
-    const timeout = setTimeout(runTypingLoop, 6000);
-    whatsappTypingLoops.set(jid, timeout);
-  };
-  runTypingLoop();
+  channel.sendTyping().catch(() => {});
 });
 
 client.on('whatsappRead', async ({ id, jid }) => {
