@@ -140,6 +140,19 @@ const connectToWhatsApp = async (retry = 1) => {
     ['chats.set', 'contacts.set', 'chats.upsert', 'chats.update', 'contacts.upsert', 'contacts.update', 'groups.upsert', 'groups.update']
       .forEach((eventName) => client.ev.on(eventName, contactUpdater));
 
+    client.ev.on('lid-mapping.update', ({ lid, pn }) => {
+        const normalizedLid = utils.whatsapp.formatJid(lid);
+        const normalizedPn = utils.whatsapp.formatJid(pn);
+        if (!normalizedLid || !normalizedPn) return;
+        const firstIsLid = utils.whatsapp.isLidJid(normalizedLid);
+        const secondIsLid = utils.whatsapp.isLidJid(normalizedPn);
+        if (firstIsLid && !secondIsLid) {
+            utils.whatsapp.migrateLegacyJid(normalizedPn, normalizedLid);
+        } else if (!firstIsLid && secondIsLid) {
+            utils.whatsapp.migrateLegacyJid(normalizedLid, normalizedPn);
+        }
+    });
+
     client.ev.on('messages.upsert', async (update) => {
         if (['notify', 'append'].includes(update.type)) {
             for await (const rawMessage of update.messages) {

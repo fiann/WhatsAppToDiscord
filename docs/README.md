@@ -4,7 +4,7 @@ WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Di
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by [arespawn](https://github.com/arespawn).
 
-> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.6` introduces the Baileys 7 migration and is **not yet stable**. Expect rapid updates and potential breaking changes until a stable release lands.
+> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.7` introduces the Baileys 7 migration and is **not yet stable**. Expect rapid updates and potential breaking changes until a stable release lands.
 
 ## Requirements
 
@@ -24,6 +24,13 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by 
 - Checks for updates every couple of days and can apply signed updates on command (packaged builds only)
 
 **Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
+
+## Baileys 7 migration notes
+
+This repository tracks Baileys `7.0.0-rc.9`. Upstream outlines every breaking change in their migration article: [https://whiskey.so/migrate-latest](https://whiskey.so/migrate-latest). The bridge automatically adapts to the important pieces:
+
+- Local Identifiers (LIDs) are now preferred over PN-based JIDs. The bot listens for `lid-mapping.update` events, migrates stored chats/whitelists as WhatsApp reveals PN↔LID pairs, and always talks to the chat using the identifier WhatsApp considers canonical.
+- The Signal auth store seeds the newly required `lid-mapping`, `tctoken`, `device-list`, and `device-index` namespaces so rc.9 can write those blobs without crashing.
 
 ## Running
 

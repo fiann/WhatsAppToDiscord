@@ -4,7 +4,7 @@ WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Di
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now maintained by [arespawn](https://github.com/arespawn) with the blessing of the previous author.
 
-> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.6` ships the Baileys 7 migration and is considered **unstable**. Expect rapid changes and breaking issues until a stable tag is published.
+> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.7` ships the Baileys 7 migration and is considered **unstable**. Expect rapid changes and breaking issues until a stable tag is published.
 
 ## Requirements
 
@@ -24,6 +24,13 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now
 - Checks for updates every couple of days and can apply signed updates on command (packaged builds only)
 
 **Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
+
+## Baileys 7 migration notes
+
+We bundle Baileys `7.0.0-rc.9`, which ships multiple breaking changes. Read the upstream migration guide at [https://whiskey.so/migrate-latest](https://whiskey.so/migrate-latest) for the full context. Highlights for this project:
+
+- WhatsApp now prefers Local Identifiers (LIDs) over phone-number JIDs. The bot keeps your Discord mappings, whitelist, and cached contacts synchronized with whichever identifier WhatsApp reports by subscribing to the new `lid-mapping.update` feed and retrofitting any PN-only entries.
+- Signal auth stores must expose the `lid-mapping`, `tctoken`, `device-list`, and `device-index` buckets. The included storage helpers pre-create those files so rc.9 can sync keys safely.
 
 ## Running
 
@@ -63,7 +70,7 @@ This keeps you in control of when updates are applied instead of auto-updating.
 ### Automatic updates
 
 Images are published to the GitHub Container Registry on every release, with
-immutable version tags (for example, `v2.0.0-alpha.6`) and moving channels:
+immutable version tags (for example, `v2.0.0-alpha.7`) and moving channels:
 
 - `stable` (also published as `latest`) tracks the newest stable release.
 - `unstable` tracks the newest prerelease.
