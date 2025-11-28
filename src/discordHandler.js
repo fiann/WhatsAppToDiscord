@@ -5,7 +5,7 @@ import state from './state.js';
 import utils from './utils.js';
 import storage from './storage.js';
 
-const { Client, Intents } = discordJs;
+const { Client, Intents, Constants } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 
@@ -18,10 +18,126 @@ const client = new Client({
   ],
 });
 let controlChannel;
+let slashRegisterWarned = false;
 const pendingAlbums = {};
 const typingTimeouts = {};
 const deliveredMessages = new Set();
 const FORCE_TOKENS = new Set(['--force', '-f']);
+const BOT_PERMISSIONS = 536879120;
+
+class CommandResponder {
+  constructor({ interaction, channel }) {
+    this.interaction = interaction;
+    this.channel = channel;
+    this.replied = false;
+    this.deferred = false;
+    this.firstEditSent = false;
+    this.ephemeral = interaction ? interaction.channelId !== state.settings.ControlChannelID : false;
+  }
+
+  async defer() {
+    if (!this.interaction || this.deferred || this.replied) {
+      return;
+    }
+    this.deferred = true;
+    this.replied = true;
+    await this.interaction.deferReply({ ephemeral: this.ephemeral });
+  }
+
+  async send(payload) {
+    const normalized = typeof payload === 'string' ? { content: payload } : payload;
+    if (this.interaction) {
+      if (this.deferred) {
+        if (!this.firstEditSent) {
+          this.firstEditSent = true;
+          return this.interaction.editReply(normalized);
+        }
+        return this.interaction.followUp({ ...normalized, ephemeral: this.ephemeral });
+      }
+      if (!this.replied) {
+        this.replied = true;
+        return this.interaction.reply({ ...normalized, ephemeral: this.ephemeral });
+      }
+      return this.interaction.followUp({ ...normalized, ephemeral: this.ephemeral });
+    }
+
+    return this.channel?.send(normalized);
+  }
+
+  async sendPartitioned(text) {
+    const parts = utils.discord.partitionText(text || '');
+    for (const part of parts) {
+      // eslint-disable-next-line no-await-in-loop
+      await this.send(part);
+    }
+  }
+}
+
+class CommandContext {
+  constructor({ interaction, message, rawArgs = [], lowerArgs = [], responder }) {
+    this.interaction = interaction;
+    this.message = message;
+    this.rawArgs = rawArgs;
+    this.lowerArgs = lowerArgs;
+    this.responder = responder;
+  }
+
+  get channel() {
+    return this.interaction?.channel ?? this.message?.channel ?? null;
+  }
+
+  get createdTimestamp() {
+    return this.interaction?.createdTimestamp ?? this.message?.createdTimestamp ?? Date.now();
+  }
+
+  get isControlChannel() {
+    return this.channel?.id === state.settings.ControlChannelID;
+  }
+
+  get argString() {
+    return this.rawArgs.join(' ');
+  }
+
+  async reply(payload) {
+    return this.responder.send(payload);
+  }
+
+  async replyPartitioned(text) {
+    return this.responder.sendPartitioned(text);
+  }
+
+  async defer() {
+    return this.responder.defer();
+  }
+
+  getStringOption(name) {
+    return this.interaction?.options?.getString(name);
+  }
+
+  getBooleanOption(name) {
+    return this.interaction?.options?.getBoolean(name);
+  }
+
+  getIntegerOption(name) {
+    return this.interaction?.options?.getInteger(name);
+  }
+
+  getNumberOption(name) {
+    return this.interaction?.options?.getNumber(name);
+  }
+
+  getChannelOption(name) {
+    return this.interaction?.options?.getChannel(name);
+  }
+
+  getMentionedChannel(index = 0) {
+    if (!this.message?.mentions?.channels?.size) {
+      return null;
+    }
+    const channels = [...this.message.mentions.channels.values()];
+    return channels[index] ?? null;
+  }
+}
 
 const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) => {
   let msgContent = '';
@@ -180,6 +296,7 @@ const setControlChannel = async () => {
 
 client.on('ready', async () => {
   await setControlChannel();
+  await registerSlashCommands();
 });
 
 client.on('channelDelete', async (channel) => {
@@ -402,703 +519,1168 @@ client.on('whatsappCall', async ({ call, jid }) => {
   }
 });
 
-const commands = {
-  async ping(message) {
-    controlChannel.send(`Pong ${Date.now() - message.createdTimestamp}ms!`);
+const { ApplicationCommandOptionTypes } = Constants;
+
+const commandHandlers = {
+  ping: {
+    description: 'Check the bot latency.',
+    async execute(ctx) {
+      await ctx.reply(`Pong ${Date.now() - ctx.createdTimestamp}ms!`);
+    },
   },
-  async pairwithcode(_message, params) {
-    if (params.length !== 1) {
-      await controlChannel.send('Please enter your number. Usage: `pairWithCode <number>`. Don\'t use "+" or any other special characters.');
-      return;
-    }
+  pairwithcode: {
+    description: 'Request a WhatsApp pairing code.',
+    options: [
+      {
+        name: 'number',
+        description: 'Phone number with country code.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const number = ctx.getStringOption('number') ?? ctx.rawArgs[0];
+      if (!number) {
+        await ctx.reply('Please enter your number. Usage: `pairWithCode <number>`. Don\'t use "+" or any other special characters.');
+        return;
+      }
 
-    const code = await state.waClient.requestPairingCode(params[0]);
-    await controlChannel.send(`Your pairing code is: ${code}`);
+      const code = await state.waClient.requestPairingCode(number);
+      await ctx.reply(`Your pairing code is: ${code}`);
+    },
   },
-  async start(_message, params) {
-    if (!params.length) {
-      await controlChannel.send('Please enter a phone number or name. Usage: `start <number with country code or name>`.');
-      return;
-    }
+  start: {
+    description: 'Start a conversation with a contact or number.',
+    options: [
+      {
+        name: 'contact',
+        description: 'Number with country code or contact name.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const contact = ctx.getStringOption('contact') ?? ctx.argString;
+      if (!contact) {
+        await ctx.reply('Please enter a phone number or name. Usage: `start <number with country code or name>`.');
+        return;
+      }
 
-    // eslint-disable-next-line no-restricted-globals
-    const jid = utils.whatsapp.toJid(params.join(' '));
-    if (!jid) {
-      await controlChannel.send(`Couldn't find \`${params.join(' ')}\`.`);
-      return;
-    }
-    await utils.discord.getOrCreateChannel(jid);
+      // eslint-disable-next-line no-restricted-globals
+      const jid = utils.whatsapp.toJid(contact);
+      if (!jid) {
+        await ctx.reply(`Couldn't find \`${contact}\`.`);
+        return;
+      }
+      const webhook = await utils.discord.getOrCreateChannel(jid);
+      if (!webhook) {
+        await ctx.reply('Failed to start the conversation. Please try again.');
+        return;
+      }
 
-    if (state.settings.Whitelist.length) {
+      if (state.settings.Whitelist.length) {
+        const normalized = utils.whatsapp.formatJid(jid);
+        if (normalized && !state.settings.Whitelist.includes(normalized)) {
+          state.settings.Whitelist.push(normalized);
+        }
+      }
+
+      const channelMention = webhook.channelId ? `<#${webhook.channelId}>` : 'the linked channel';
+      await ctx.reply(`Started a conversation in ${channelMention}.`);
+    },
+  },
+  link: {
+    description: 'Link a WhatsApp chat to an existing channel.',
+    options: [
+      {
+        name: 'contact',
+        description: 'Number with country code or contact name.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+      {
+        name: 'channel',
+        description: 'Target Discord channel.',
+        type: ApplicationCommandOptionTypes.CHANNEL,
+        required: true,
+      },
+      {
+        name: 'force',
+        description: 'Override an existing link.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: false,
+      },
+    ],
+    async execute(ctx) {
+      const force = ctx.getBooleanOption('force') ?? ctx.lowerArgs?.some((token) => FORCE_TOKENS.has(token));
+      const slashChannel = ctx.getChannelOption('channel');
+      const messageChannel = ctx.message?.mentions?.channels?.first();
+      const channel = slashChannel ?? messageChannel;
+      const argsWithoutFlags = (ctx.lowerArgs || []).filter((token) => !FORCE_TOKENS.has(token));
+      const mentionTokenLower = channel ? `<#${channel.id}>`.toLowerCase() : null;
+
+      let contactQuery = ctx.getStringOption('contact');
+      if (!contactQuery && ctx.rawArgs?.length) {
+        const mentionIndex = mentionTokenLower != null ? argsWithoutFlags.indexOf(mentionTokenLower) : -1;
+        if (mentionIndex === -1) {
+          contactQuery = ctx.rawArgs.filter((token, idx) => !FORCE_TOKENS.has(ctx.lowerArgs[idx]) && token !== mentionTokenLower).join(' ');
+        } else {
+          contactQuery = ctx.rawArgs.slice(0, mentionIndex).join(' ');
+        }
+      }
+
+      if (!channel || !contactQuery) {
+        await ctx.reply('Please provide a contact and a channel. Usage: `link <number with country code or name> #<channel>`');
+        return;
+      }
+
+      if (channel.id === state.settings.ControlChannelID) {
+        await ctx.reply('The control channel cannot be linked. Please choose another channel.');
+        return;
+      }
+
+      if (channel.guildId !== state.settings.GuildID) {
+        await ctx.reply('Please choose a channel from the configured Discord server.');
+        return;
+      }
+
+      if (!['GUILD_TEXT', 'GUILD_NEWS'].includes(channel.type)) {
+        await ctx.reply('Only text channels can be linked. Please choose a text channel.');
+        return;
+      }
+
+      const jid = utils.whatsapp.toJid(contactQuery);
+      const normalizedJid = utils.whatsapp.formatJid(jid);
+      if (!normalizedJid) {
+        await ctx.reply(`Couldn't find \`${contactQuery}\`.`);
+        return;
+      }
+
+      const existingJid = utils.discord.channelIdToJid(channel.id);
+      const forcedTakeover = Boolean(existingJid && existingJid !== normalizedJid && force);
+      let displacedChat;
+      let displacedRun;
+      if (existingJid && existingJid !== normalizedJid) {
+        if (!force) {
+          await ctx.reply('That channel is already linked to another WhatsApp conversation. Add `--force` (or use the `move` command) to override it.');
+          return;
+        }
+        displacedChat = state.chats[existingJid];
+        displacedRun = state.goccRuns[existingJid];
+        delete state.chats[existingJid];
+        delete state.goccRuns[existingJid];
+      }
+
+      let webhook;
+      try {
+        const webhooks = await channel.fetchWebhooks();
+        webhook = webhooks.find((hook) => hook.token && hook.owner?.id === client.user.id);
+        if (!webhook) {
+          webhook = await channel.createWebhook('WA2DC');
+        }
+      } catch (err) {
+        state.logger?.error(err);
+        await ctx.reply('Failed to access or create a webhook for that channel. Check the bot\'s permissions.');
+        return;
+      }
+
+      const previousChat = state.chats[normalizedJid];
+      const previousChannelId = previousChat?.channelId;
+      const previousRun = state.goccRuns[normalizedJid];
+      state.chats[normalizedJid] = {
+        id: webhook.id,
+        type: webhook.type,
+        token: webhook.token,
+        channelId: webhook.channelId,
+      };
+      delete state.goccRuns[normalizedJid];
+
+      try {
+        await utils.discord.getOrCreateChannel(normalizedJid);
+        await storage.save();
+      } catch (err) {
+        state.logger?.error(err);
+        if (previousChat) {
+          state.chats[normalizedJid] = previousChat;
+        } else {
+          delete state.chats[normalizedJid];
+        }
+        if (previousRun) {
+          state.goccRuns[normalizedJid] = previousRun;
+        } else {
+          delete state.goccRuns[normalizedJid];
+        }
+        if (forcedTakeover) {
+          if (displacedChat) {
+            state.chats[existingJid] = displacedChat;
+          }
+          if (displacedRun) {
+            state.goccRuns[existingJid] = displacedRun;
+          }
+        }
+        await ctx.reply('Linked the channel, but failed to finalize the setup. Please try again.');
+        return;
+      }
+
+      if (previousChannelId && previousChannelId !== channel.id && previousChat?.id) {
+        try {
+          const previousChannel = await utils.discord.getChannel(previousChannelId);
+          const previousWebhooks = await previousChannel?.fetchWebhooks();
+          const previousWebhook = previousWebhooks?.get(previousChat.id) || previousWebhooks?.find((hook) => hook.id === previousChat.id);
+          await previousWebhook?.delete('WA2DC channel relinked');
+        } catch (err) {
+          state.logger?.warn(err);
+        }
+      }
+
+      const forcedSuffix = forcedTakeover
+        ? ` (overrode the previous link to \`${utils.whatsapp.jidToName(existingJid)}\`).`
+        : '.';
+      await ctx.reply(`Linked ${channel} with \`${utils.whatsapp.jidToName(normalizedJid)}\`${forcedSuffix}`);
+    },
+  },
+  move: {
+    description: 'Move a WhatsApp link from one channel to another.',
+    options: [
+      {
+        name: 'from',
+        description: 'Current channel.',
+        type: ApplicationCommandOptionTypes.CHANNEL,
+        required: true,
+      },
+      {
+        name: 'to',
+        description: 'Destination channel.',
+        type: ApplicationCommandOptionTypes.CHANNEL,
+        required: true,
+      },
+      {
+        name: 'force',
+        description: 'Override any existing link on the destination.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: false,
+      },
+    ],
+    async execute(ctx) {
+      const slashFrom = ctx.getChannelOption('from');
+      const slashTo = ctx.getChannelOption('to');
+      const mentionMatches = ctx.message?.content?.match(/<#(\d+)>/g) || [];
+      const orderedIds = [];
+      for (const token of mentionMatches) {
+        const id = token.replace(/[^\d]/g, '');
+        if (id && !orderedIds.includes(id)) {
+          orderedIds.push(id);
+        }
+        if (orderedIds.length === 2) {
+          break;
+        }
+      }
+      const messageFrom = orderedIds[0] ? ctx.message?.mentions?.channels?.get(orderedIds[0]) : null;
+      const messageTo = orderedIds[1] ? ctx.message?.mentions?.channels?.get(orderedIds[1]) : null;
+      const source = slashFrom ?? messageFrom;
+      const target = slashTo ?? messageTo;
+      const force = ctx.getBooleanOption('force') ?? (ctx.lowerArgs?.some((token) => FORCE_TOKENS.has(token)));
+
+      if (!source || !target) {
+        await ctx.reply('Please mention the current channel and the new channel. Usage: `move #old-channel #new-channel [--force]`');
+        return;
+      }
+
+      if (source.id === target.id) {
+        await ctx.reply('Please mention two different channels to move between.');
+        return;
+      }
+
+      if (source.id === state.settings.ControlChannelID || target.id === state.settings.ControlChannelID) {
+        await ctx.reply('The control channel cannot participate in moves. Choose two regular text channels.');
+        return;
+      }
+
+      if (source.guildId !== state.settings.GuildID || target.guildId !== state.settings.GuildID) {
+        await ctx.reply('Please choose channels from the configured Discord server.');
+        return;
+      }
+
+      if (!['GUILD_TEXT', 'GUILD_NEWS'].includes(target.type)) {
+        await ctx.reply('Only text or announcement channels can be targets. Please choose a different channel.');
+        return;
+      }
+
+      const sourceJidRaw = utils.discord.channelIdToJid(source.id);
+      const normalizedJid = utils.whatsapp.formatJid(sourceJidRaw);
+      if (!normalizedJid) {
+        await ctx.reply('The source channel is not linked to any WhatsApp conversation.');
+        return;
+      }
+
+      const existingTargetJid = utils.discord.channelIdToJid(target.id);
+      const forcedTakeover = Boolean(existingTargetJid && existingTargetJid !== normalizedJid && force);
+      let displacedChat;
+      let displacedRun;
+      if (existingTargetJid && existingTargetJid !== normalizedJid) {
+        if (!force) {
+          await ctx.reply('That destination channel is already linked to another conversation. Add `--force` to override it.');
+          return;
+        }
+        displacedChat = state.chats[existingTargetJid];
+        displacedRun = state.goccRuns[existingTargetJid];
+        delete state.chats[existingTargetJid];
+        delete state.goccRuns[existingTargetJid];
+      }
+
+      let webhook;
+      try {
+        const webhooks = await target.fetchWebhooks();
+        webhook = webhooks.find((hook) => hook.token && hook.owner?.id === client.user.id);
+        if (!webhook) {
+          webhook = await target.createWebhook('WA2DC');
+        }
+      } catch (err) {
+        state.logger?.error(err);
+        if (forcedTakeover) {
+          if (displacedChat) {
+            state.chats[existingTargetJid] = displacedChat;
+          }
+          if (displacedRun) {
+            state.goccRuns[existingTargetJid] = displacedRun;
+          }
+        }
+        await ctx.reply('Failed to access or create a webhook for the destination channel. Check the bot\'s permissions.');
+        return;
+      }
+
+      const previousChat = state.chats[normalizedJid];
+      const previousRun = state.goccRuns[normalizedJid];
+      state.chats[normalizedJid] = {
+        id: webhook.id,
+        type: webhook.type,
+        token: webhook.token,
+        channelId: webhook.channelId,
+      };
+      delete state.goccRuns[normalizedJid];
+
+      try {
+        await utils.discord.getOrCreateChannel(normalizedJid);
+        await storage.save();
+      } catch (err) {
+        state.logger?.error(err);
+        if (previousChat) {
+          state.chats[normalizedJid] = previousChat;
+        } else {
+          delete state.chats[normalizedJid];
+        }
+        if (previousRun) {
+          state.goccRuns[normalizedJid] = previousRun;
+        } else {
+          delete state.goccRuns[normalizedJid];
+        }
+        if (forcedTakeover) {
+          if (displacedChat) {
+            state.chats[existingTargetJid] = displacedChat;
+          }
+          if (displacedRun) {
+            state.goccRuns[existingTargetJid] = displacedRun;
+          }
+        }
+        await ctx.reply('Moved the channel, but failed to finalize the setup. Please try again.');
+        return;
+      }
+
+      if (previousChat?.channelId && previousChat.channelId !== webhook.channelId && previousChat.id) {
+        try {
+          const previousChannel = await utils.discord.getChannel(previousChat.channelId);
+          const previousWebhooks = await previousChannel?.fetchWebhooks();
+          const previousWebhook = previousWebhooks?.get(previousChat.id) || previousWebhooks?.find((hook) => hook.id === previousChat.id);
+          await previousWebhook?.delete('WA2DC channel moved');
+        } catch (err) {
+          state.logger?.warn(err);
+        }
+      }
+
+      const forcedSuffix = forcedTakeover
+        ? ` (overrode the previous link to \`${utils.whatsapp.jidToName(existingTargetJid)}\`).`
+        : '.';
+      await ctx.reply(
+        `Moved \`${utils.whatsapp.jidToName(normalizedJid)}\` from ${source} to ${target}${forcedSuffix}`,
+      );
+    },
+  },
+  list: {
+    description: 'List contacts and groups.',
+    options: [
+      {
+        name: 'query',
+        description: 'Optional search text.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: false,
+      },
+    ],
+    async execute(ctx) {
+      let contacts = utils.whatsapp.contacts();
+      const query = (ctx.getStringOption('query') ?? ctx.argString)?.toLowerCase();
+      if (query) { contacts = contacts.filter((name) => name.toLowerCase().includes(query)); }
+      contacts = contacts.sort((a, b) => a.localeCompare(b)).join('\n');
+      const message = utils.discord.partitionText(
+        contacts.length
+          ? `${contacts}\n\nNot the whole list? You can refresh your contacts by typing \`resync\``
+          : 'No results were found.',
+      );
+      while (message.length !== 0) {
+        // eslint-disable-next-line no-await-in-loop
+        await ctx.reply(message.shift());
+      }
+    },
+  },
+  addtowhitelist: {
+    description: 'Add a channel to the whitelist.',
+    options: [
+      {
+        name: 'channel',
+        description: 'Channel linked to a WhatsApp chat.',
+        type: ApplicationCommandOptionTypes.CHANNEL,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const channel = ctx.getChannelOption('channel') ?? ctx.getMentionedChannel();
+      if (!channel) {
+        await ctx.reply('Please enter a valid channel name. Usage: `addToWhitelist #<target channel>`.');
+        return;
+      }
+
+      const jid = utils.discord.channelIdToJid(channel.id);
+      if (!jid) {
+        await ctx.reply("Couldn't find a chat with the given channel.");
+        return;
+      }
+
       const normalized = utils.whatsapp.formatJid(jid);
       if (normalized && !state.settings.Whitelist.includes(normalized)) {
         state.settings.Whitelist.push(normalized);
       }
-    }
+      await ctx.reply('Added to the whitelist!');
+    },
   },
-  async link(message, params) {
-    const channel = message.mentions.channels.first();
-    const cleanedParams = params.filter(Boolean);
-    const force = cleanedParams.some((token) => FORCE_TOKENS.has(token));
-    const paramsWithoutFlags = cleanedParams.filter((token) => !FORCE_TOKENS.has(token));
-    if (!channel || paramsWithoutFlags.length < 2) {
-      await controlChannel.send('Please provide a contact and a channel. Usage: `link <number with country code or name> #<channel>`');
-      return;
-    }
-
-    if (channel.id === state.settings.ControlChannelID) {
-      await controlChannel.send('The control channel cannot be linked. Please choose another channel.');
-      return;
-    }
-
-    if (channel.guildId !== state.settings.GuildID) {
-      await controlChannel.send('Please choose a channel from the configured Discord server.');
-      return;
-    }
-
-    if (!['GUILD_TEXT', 'GUILD_NEWS'].includes(channel.type)) {
-      await controlChannel.send('Only text channels can be linked. Please choose a text channel.');
-      return;
-    }
-
-    const mentionTokenLower = `<#${channel.id}>`.toLowerCase();
-    const mentionIndex = paramsWithoutFlags.indexOf(mentionTokenLower);
-    const contactTokens = mentionIndex === -1
-      ? paramsWithoutFlags.filter((token) => token !== mentionTokenLower)
-      : paramsWithoutFlags.slice(0, mentionIndex);
-
-    if (!contactTokens.length) {
-      await controlChannel.send('Please provide a contact before the channel mention. Usage: `link <number with country code or name> #<channel>`');
-      return;
-    }
-
-    const jidQuery = contactTokens.join(' ');
-    const jid = utils.whatsapp.toJid(jidQuery);
-    const normalizedJid = utils.whatsapp.formatJid(jid);
-    if (!normalizedJid) {
-      await controlChannel.send(`Couldn't find \`${jidQuery}\`.`);
-      return;
-    }
-
-    const existingJid = utils.discord.channelIdToJid(channel.id);
-    const forcedTakeover = Boolean(existingJid && existingJid !== normalizedJid && force);
-    let displacedChat;
-    let displacedRun;
-    if (existingJid && existingJid !== normalizedJid) {
-      if (!force) {
-        await controlChannel.send('That channel is already linked to another WhatsApp conversation. Add `--force` (or use the `move` command) to override it.');
+  removefromwhitelist: {
+    description: 'Remove a channel from the whitelist.',
+    options: [
+      {
+        name: 'channel',
+        description: 'Channel linked to a WhatsApp chat.',
+        type: ApplicationCommandOptionTypes.CHANNEL,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const channel = ctx.getChannelOption('channel') ?? ctx.getMentionedChannel();
+      if (!channel) {
+        await ctx.reply('Please enter a valid channel name. Usage: `removeFromWhitelist #<target channel>`.');
         return;
       }
-      displacedChat = state.chats[existingJid];
-      displacedRun = state.goccRuns[existingJid];
-      delete state.chats[existingJid];
-      delete state.goccRuns[existingJid];
-    }
 
-    let webhook;
-    try {
-      const webhooks = await channel.fetchWebhooks();
-      webhook = webhooks.find((hook) => hook.token && hook.owner?.id === client.user.id);
-      if (!webhook) {
-        webhook = await channel.createWebhook('WA2DC');
-      }
-    } catch (err) {
-      state.logger?.error(err);
-      await controlChannel.send('Failed to access or create a webhook for that channel. Check the bot\'s permissions.');
-      return;
-    }
-
-    const previousChat = state.chats[normalizedJid];
-    const previousChannelId = previousChat?.channelId;
-    const previousRun = state.goccRuns[normalizedJid];
-    state.chats[normalizedJid] = {
-      id: webhook.id,
-      type: webhook.type,
-      token: webhook.token,
-      channelId: webhook.channelId,
-    };
-    delete state.goccRuns[normalizedJid];
-
-    try {
-      await utils.discord.getOrCreateChannel(normalizedJid);
-      await storage.save();
-    } catch (err) {
-      state.logger?.error(err);
-      if (previousChat) {
-        state.chats[normalizedJid] = previousChat;
-      } else {
-        delete state.chats[normalizedJid];
-      }
-      if (previousRun) {
-        state.goccRuns[normalizedJid] = previousRun;
-      } else {
-        delete state.goccRuns[normalizedJid];
-      }
-      if (forcedTakeover) {
-        if (displacedChat) {
-          state.chats[existingJid] = displacedChat;
-        }
-        if (displacedRun) {
-          state.goccRuns[existingJid] = displacedRun;
-        }
-      }
-      await controlChannel.send('Linked the channel, but failed to finalize the setup. Please try again.');
-      return;
-    }
-
-    if (previousChannelId && previousChannelId !== channel.id && previousChat?.id) {
-      try {
-        const previousChannel = await utils.discord.getChannel(previousChannelId);
-        const previousWebhooks = await previousChannel?.fetchWebhooks();
-        const previousWebhook = previousWebhooks?.get(previousChat.id) || previousWebhooks?.find((hook) => hook.id === previousChat.id);
-        await previousWebhook?.delete('WA2DC channel relinked');
-      } catch (err) {
-        state.logger?.warn(err);
-      }
-    }
-
-    const forcedSuffix = forcedTakeover
-      ? ` (overrode the previous link to \`${utils.whatsapp.jidToName(existingJid)}\`).`
-      : '.';
-    await controlChannel.send(`Linked ${channel} with \`${utils.whatsapp.jidToName(normalizedJid)}\`${forcedSuffix}`);
-  },
-  async move(message, params) {
-    const cleanedParams = params.filter(Boolean);
-    const force = cleanedParams.some((token) => FORCE_TOKENS.has(token));
-    const mentionMatches = message.content.match(/<#(\d+)>/g) || [];
-    const orderedIds = [];
-    for (const token of mentionMatches) {
-      const id = token.replace(/[^\d]/g, '');
-      if (id && !orderedIds.includes(id)) {
-        orderedIds.push(id);
-      }
-      if (orderedIds.length === 2) {
-        break;
-      }
-    }
-
-    const [sourceId, targetId] = orderedIds;
-    const source = sourceId ? message.mentions.channels.get(sourceId) : null;
-    const target = targetId ? message.mentions.channels.get(targetId) : null;
-
-    if (!source || !target) {
-      await controlChannel.send('Please mention the current channel and the new channel. Usage: `move #old-channel #new-channel [--force]`');
-      return;
-    }
-
-    if (source.id === target.id) {
-      await controlChannel.send('Please mention two different channels to move between.');
-      return;
-    }
-
-    if (source.id === state.settings.ControlChannelID || target.id === state.settings.ControlChannelID) {
-      await controlChannel.send('The control channel cannot participate in moves. Choose two regular text channels.');
-      return;
-    }
-
-    if (source.guildId !== state.settings.GuildID || target.guildId !== state.settings.GuildID) {
-      await controlChannel.send('Please choose channels from the configured Discord server.');
-      return;
-    }
-
-    if (!['GUILD_TEXT', 'GUILD_NEWS'].includes(target.type)) {
-      await controlChannel.send('Only text or announcement channels can be targets. Please choose a different channel.');
-      return;
-    }
-
-    const sourceJidRaw = utils.discord.channelIdToJid(source.id);
-    const normalizedJid = utils.whatsapp.formatJid(sourceJidRaw);
-    if (!normalizedJid) {
-      await controlChannel.send('The source channel is not linked to any WhatsApp conversation.');
-      return;
-    }
-
-    const existingTargetJid = utils.discord.channelIdToJid(target.id);
-    const forcedTakeover = Boolean(existingTargetJid && existingTargetJid !== normalizedJid && force);
-    let displacedChat;
-    let displacedRun;
-    if (existingTargetJid && existingTargetJid !== normalizedJid) {
-      if (!force) {
-        await controlChannel.send('That destination channel is already linked to another conversation. Add `--force` to override it.');
+      const jid = utils.discord.channelIdToJid(channel.id);
+      if (!jid) {
+        await ctx.reply("Couldn't find a chat with the given channel.");
         return;
       }
-      displacedChat = state.chats[existingTargetJid];
-      displacedRun = state.goccRuns[existingTargetJid];
-      delete state.chats[existingTargetJid];
-      delete state.goccRuns[existingTargetJid];
-    }
 
-    let webhook;
-    try {
-      const webhooks = await target.fetchWebhooks();
-      webhook = webhooks.find((hook) => hook.token && hook.owner?.id === client.user.id);
-      if (!webhook) {
-        webhook = await target.createWebhook('WA2DC');
-      }
-    } catch (err) {
-      state.logger?.error(err);
-      if (forcedTakeover) {
-        if (displacedChat) {
-          state.chats[existingTargetJid] = displacedChat;
-        }
-        if (displacedRun) {
-          state.goccRuns[existingTargetJid] = displacedRun;
-        }
-      }
-      await controlChannel.send('Failed to access or create a webhook for the destination channel. Check the bot\'s permissions.');
-      return;
-    }
-
-    const previousChat = state.chats[normalizedJid];
-    const previousRun = state.goccRuns[normalizedJid];
-    state.chats[normalizedJid] = {
-      id: webhook.id,
-      type: webhook.type,
-      token: webhook.token,
-      channelId: webhook.channelId,
-    };
-    delete state.goccRuns[normalizedJid];
-
-    try {
-      await utils.discord.getOrCreateChannel(normalizedJid);
-      await storage.save();
-    } catch (err) {
-      state.logger?.error(err);
-      if (previousChat) {
-        state.chats[normalizedJid] = previousChat;
-      } else {
-        delete state.chats[normalizedJid];
-      }
-      if (previousRun) {
-        state.goccRuns[normalizedJid] = previousRun;
-      } else {
-        delete state.goccRuns[normalizedJid];
-      }
-      if (forcedTakeover) {
-        if (displacedChat) {
-          state.chats[existingTargetJid] = displacedChat;
-        }
-        if (displacedRun) {
-          state.goccRuns[existingTargetJid] = displacedRun;
-        }
-      }
-      await controlChannel.send('Moved the channel, but failed to finalize the setup. Please try again.');
-      return;
-    }
-
-    if (previousChat?.channelId && previousChat.channelId !== webhook.channelId && previousChat.id) {
-      try {
-        const previousChannel = await utils.discord.getChannel(previousChat.channelId);
-        const previousWebhooks = await previousChannel?.fetchWebhooks();
-        const previousWebhook = previousWebhooks?.get(previousChat.id) || previousWebhooks?.find((hook) => hook.id === previousChat.id);
-        await previousWebhook?.delete('WA2DC channel moved');
-      } catch (err) {
-        state.logger?.warn(err);
-      }
-    }
-
-    const forcedSuffix = forcedTakeover
-      ? ` (overrode the previous link to \`${utils.whatsapp.jidToName(existingTargetJid)}\`).`
-      : '.';
-    await controlChannel.send(
-      `Moved \`${utils.whatsapp.jidToName(normalizedJid)}\` from ${source} to ${target}${forcedSuffix}`,
-    );
+      const normalized = utils.whatsapp.formatJid(jid);
+      state.settings.Whitelist = state.settings.Whitelist.filter((el) => el !== normalized);
+      await ctx.reply('Removed from the whitelist!');
+    },
   },
-  async list(_message, params) {
-    let contacts = utils.whatsapp.contacts();
-    if (params) { contacts = contacts.filter((name) => name.toLowerCase().includes(params.join(' '))); }
-    contacts = contacts.sort((a, b) => a.localeCompare(b)).join('\n');
-    const message = utils.discord.partitionText(
-      contacts.length
-        ? `${contacts}\n\nNot the whole list? You can refresh your contacts by typing \`resync\``
-        : 'No results were found.',
-    );
-    while (message.length !== 0) {
-      // eslint-disable-next-line no-await-in-loop
-      await controlChannel.send(message.shift());
-    }
-  },
-  async addtowhitelist(message, params) {
-    const channelID = /<#(\d*)>/.exec(message)?.[1];
-    if (params.length !== 1 || !channelID) {
-      await controlChannel.send('Please enter a valid channel name. Usage: `addToWhitelist #<target channel>`.');
-      return;
-    }
-
-    const jid = utils.discord.channelIdToJid(channelID);
-    if (!jid) {
-      await controlChannel.send("Couldn't find a chat with the given channel.");
-      return;
-    }
-
-    const normalized = utils.whatsapp.formatJid(jid);
-    if (normalized && !state.settings.Whitelist.includes(normalized)) {
-      state.settings.Whitelist.push(normalized);
-    }
-    await controlChannel.send('Added to the whitelist!');
-  },
-  async removefromwhitelist(message, params) {
-    const channelID = /<#(\d*)>/.exec(message)?.[1];
-    if (params.length !== 1 || !channelID) {
-      await controlChannel.send('Please enter a valid channel name. Usage: `removeFromWhitelist #<target channel>`.');
-      return;
-    }
-
-    const jid = utils.discord.channelIdToJid(channelID);
-    if (!jid) {
-      await controlChannel.send("Couldn't find a chat with the given channel.");
-      return;
-    }
-
-    const normalized = utils.whatsapp.formatJid(jid);
-    state.settings.Whitelist = state.settings.Whitelist.filter((el) => el !== normalized);
-    await controlChannel.send('Removed from the whitelist!');
-  },
-  async listwhitelist() {
-    await controlChannel.send(
-      state.settings.Whitelist.length
-        ? `\`\`\`${state.settings.Whitelist.map((jid) => utils.whatsapp.jidToName(jid)).join('\n')}\`\`\``
-        : 'Whitelist is empty/inactive.',
-    );
-  },
-  async setdcprefix(message, params) {
-    if (params.length !== 0) {
-      const prefix = message.content.split(' ').slice(1).join(' ');
-      state.settings.DiscordPrefixText = prefix;
-      await controlChannel.send(`Discord prefix is set to ${prefix}!`);
-    } else {
-      state.settings.DiscordPrefixText = null;
-      await controlChannel.send('Discord prefix is set to your discord username!');
-    }
-  },
-  async enabledcprefix() {
-    state.settings.DiscordPrefix = true;
-    await controlChannel.send('Discord username prefix enabled!');
-  },
-  async disabledcprefix() {
-    state.settings.DiscordPrefix = false;
-    await controlChannel.send('Discord username prefix disabled!');
-  },
-  async enablewaprefix() {
-    state.settings.WAGroupPrefix = true;
-    await controlChannel.send('WhatsApp name prefix enabled!');
-  },
-  async disablewaprefix() {
-    state.settings.WAGroupPrefix = false;
-    await controlChannel.send('WhatsApp name prefix disabled!');
-  },
-  async enablewaupload() {
-    state.settings.UploadAttachments = true;
-    await controlChannel.send('Enabled uploading files to WhatsApp!');
-  },
-  async disablewaupload() {
-    state.settings.UploadAttachments = false;
-    await controlChannel.send('Disabled uploading files to WhatsApp!');
-  },
-  async enabledeletes() {
-    state.settings.DeleteMessages = true;
-    await controlChannel.send('Enabled message delete syncing!');
-  },
-  async disabledeletes() {
-    state.settings.DeleteMessages = false;
-    await controlChannel.send('Disabled message delete syncing!');
-  },
-  async enablereadreceipts() {
-    state.settings.ReadReceipts = true;
-    await controlChannel.send('Enabled read receipts!');
-  },
-  async disablereadreceipts() {
-    state.settings.ReadReceipts = false;
-    await controlChannel.send('Disabled read receipts!');
-  },
-  async dmreadreceipts() {
-    state.settings.ReadReceiptMode = 'dm';
-    await controlChannel.send('Read receipts will be sent via DM.');
-  },
-  async publicreadreceipts() {
-    state.settings.ReadReceiptMode = 'public';
-    await controlChannel.send('Read receipts will be posted publicly.');
-  },
-  async reactionreadreceipts() {
-    state.settings.ReadReceiptMode = 'reaction';
-    await controlChannel.send('Read receipts will be added as ☑️ reactions.');
-  },
-  async help() {
-    await controlChannel.send('See all the available commands at https://arespawn.github.io/WhatsAppToDiscord/#/commands');
-  },
-  async resync(_message, params) {
-    await state.waClient.authState.keys.set({
-      'app-state-sync-version': { critical_unblock_low: null },
-    });
-    await state.waClient.resyncAppState(['critical_unblock_low']);
-    for (const [jid, attributes] of Object.entries(await state.waClient.groupFetchAllParticipating())) { state.waClient.contacts[jid] = attributes.subject; }
-    if (params.includes('rename')) {
-      try {
-        await utils.discord.renameChannels();
-      } catch (err) {
-        state.logger?.error(err);
-      }
-    }
-    await controlChannel.send('Re-synced!');
-  },
-  async enablelocaldownloads() {
-    state.settings.LocalDownloads = true;
-    await controlChannel.send('Enabled local downloads. You can now download files larger than Discord\'s upload limit.');
-  },
-  async disablelocaldownloads() {
-    state.settings.LocalDownloads = false;
-    await controlChannel.send('Disabled local downloads. You won\'t be able to download files larger than Discord\'s upload limit.');
-  },
-  async getdownloadmessage() {
-    await controlChannel.send(`Download message format is set to "${state.settings.LocalDownloadMessage}"`);
-  },
-  async setdownloadmessage(message) {
-    state.settings.LocalDownloadMessage = message.content.split(' ').slice(1).join(' ');
-    await controlChannel.send(`Set download message format to "${state.settings.LocalDownloadMessage}"`);
-  },
-  async getdownloaddir() {
-    await controlChannel.send(`Download path is set to "${state.settings.DownloadDir}"`);
-  },
-  async setdownloaddir(message) {
-    state.settings.DownloadDir = message.content.split(' ').slice(1).join(' ');
-    await controlChannel.send(`Set download path to "${state.settings.DownloadDir}"`);
-  },
-  async setdownloadlimit(_message, params) {
-    const gb = parseFloat(params[0]);
-    if (!Number.isNaN(gb) && gb >= 0) {
-      state.settings.DownloadDirLimitGB = gb;
-      await controlChannel.send(`Set download directory size limit to ${gb} GB.`);
-    } else {
-      await controlChannel.send('Please provide a valid size in gigabytes.');
-    }
-  },
-  async setfilesizelimit(message) {
-    const size = parseInt(message.content.split(' ')[1], 10);
-    if (!Number.isNaN(size) && size > 0) {
-      state.settings.DiscordFileSizeLimit = size;
-      await controlChannel.send(`Set Discord file size limit to ${size} bytes.`);
-    } else {
-      await controlChannel.send('Please provide a valid size in bytes.');
-    }
-  },
-  async enablelocaldownloadserver() {
-    state.settings.LocalDownloadServer = true;
-    utils.ensureDownloadServer();
-    await controlChannel.send(`Enabled local download server on port ${state.settings.LocalDownloadServerPort}.`);
-  },
-  async disablelocaldownloadserver() {
-    state.settings.LocalDownloadServer = false;
-    utils.stopDownloadServer();
-    await controlChannel.send('Disabled local download server.');
-  },
-  async setlocaldownloadserverport(_message, params) {
-    const port = parseInt(params[0], 10);
-    if (!Number.isNaN(port) && port > 0 && port <= 65535) {
-      state.settings.LocalDownloadServerPort = port;
-      utils.stopDownloadServer();
-      utils.ensureDownloadServer();
-      await controlChannel.send(`Set local download server port to ${port}.`);
-    } else {
-      await controlChannel.send('Please provide a valid port.');
-    }
-  },
-  async setlocaldownloadserverhost(_message, params) {
-    if (params[0]) {
-      state.settings.LocalDownloadServerHost = params[0];
-      utils.stopDownloadServer();
-      utils.ensureDownloadServer();
-      await controlChannel.send(`Set local download server host to ${params[0]}.`);
-    } else {
-      await controlChannel.send('Please provide a host name or IP.');
-    }
-  },
-  async enablehttpsdownloadserver() {
-    state.settings.UseHttps = true;
-    utils.stopDownloadServer();
-    utils.ensureDownloadServer();
-    await controlChannel.send('Enabled HTTPS for local download server.');
-  },
-  async disablehttpsdownloadserver() {
-    state.settings.UseHttps = false;
-    utils.stopDownloadServer();
-    utils.ensureDownloadServer();
-    await controlChannel.send('Disabled HTTPS for local download server.');
-  },
-  async sethttpscert(_message, params) {
-    if (params.length !== 2) {
-      await controlChannel.send('Usage: `setHttpsCert <key> <cert>`');
-      return;
-    }
-    [state.settings.HttpsKeyPath, state.settings.HttpsCertPath] = params;
-    utils.stopDownloadServer();
-    utils.ensureDownloadServer();
-    await controlChannel.send(`Set HTTPS key path to ${params[0]} and cert path to ${params[1]}.`);
-  },
-  async enablepublishing() {
-    state.settings.Publish = true;
-    await controlChannel.send(`Enabled publishing messages sent to news channels.`);
-  },
-  async disablepublishing() {
-    state.settings.Publish = false;
-    await controlChannel.send(`Disabled publishing messages sent to news channels.`);
-  },
-  async enablechangenotifications() {
-    state.settings.ChangeNotifications = true;
-    await controlChannel.send(`Enabled profile picture change and status update notifications.`);
-  },
-  async disablechangenotifications() {
-    state.settings.ChangeNotifications = false;
-    await controlChannel.send(`Disabled profile picture change and status update notifications.`);
-  },
-  async autosaveinterval(_message, params) {
-    if (params.length !== 1) {
-      await controlChannel.send("Usage: autoSaveInterval <seconds>\nExample: autoSaveInterval 60");
-      return;
-    }
-    state.settings.autoSaveInterval = +params[0];
-    await controlChannel.send(`Changed auto save interval to ${params[0]}.`);
-  },
-  async lastmessagestorage(_message, params) {
-    if (params.length !== 1) {
-      await controlChannel.send("Usage: lastMessageStorage <size>\nExample: lastMessageStorage 1000");
-      return;
-    }
-    state.settings.lastMessageStorage = +params[0];
-    await controlChannel.send(`Changed last message storage size to ${params[0]}.`);
-  },
-  async oneway(_message, params) {
-    if (params.length !== 1) {
-      await controlChannel.send("Usage: oneWay <discord|whatsapp|disabled>\nExample: oneWay whatsapp");
-      return;
-    }
-    
-    if (params[0] === "disabled") {
-      state.settings.oneWay = 0b11;
-      await controlChannel.send(`Two way communication is enabled.`);
-    } else if (params[0] === "whatsapp") {
-      state.settings.oneWay = 0b10;
-      await controlChannel.send(`Messages will be only sent to WhatsApp.`);
-    } else if (params[0] === "discord") {
-      state.settings.oneWay = 0b01;
-      await controlChannel.send(`Messages will be only sent to Discord.`);
-    } else {
-      await controlChannel.send("Usage: oneWay <discord|whatsapp|disabled>\nExample: oneWay whatsapp");
-    }
-  },
-  async redirectwebhooks(_message, params) {
-    if (params.length !== 1) {
-      await controlChannel.send("Usage: redirectWebhooks <yes|no>\nExample: redirectWebhooks yes");
-      return;
-    }
-
-    state.settings.redirectWebhooks = params[0] === "yes";
-    await controlChannel.send(`Redirecting webhooks is set to ${state.settings.redirectWebhooks}.`);
-  },
-  async updatechannel(_message, params) {
-    if (params.length !== 1) {
-      await controlChannel.send("Usage: updateChannel <stable|unstable>\nExample: updateChannel unstable");
-      return;
-    }
-
-    const channel = params[0].toLowerCase();
-    if (!['stable', 'unstable'].includes(channel)) {
-      await controlChannel.send("Usage: updateChannel <stable|unstable>\nExample: updateChannel unstable");
-      return;
-    }
-
-    state.settings.UpdateChannel = channel;
-    await controlChannel.send(`Update channel set to ${channel}. Checking for new releases...`);
-    await utils.updater.run(state.version, { prompt: false });
-    if (state.updateInfo) {
-      const message = utils.updater.formatUpdateMessage(state.updateInfo);
-      await utils.discord.sendPartitioned(controlChannel, message);
-    } else {
-      await controlChannel.send('No updates are available on that channel right now.');
-    }
-  },
-  async update() {
-    if (!state.updateInfo) {
-      await controlChannel.send('No update available.');
-      return;
-    }
-    if (!state.updateInfo.canSelfUpdate) {
-      await utils.discord.sendPartitioned(
-        controlChannel,
-        `A new ${state.updateInfo.channel || 'stable'} release (${state.updateInfo.version}) is available, but this installation cannot self-update.\n` +
-        'Pull the new image or binary for the requested release and restart the bot.'
+  listwhitelist: {
+    description: 'List whitelisted channels.',
+    async execute(ctx) {
+      await ctx.reply(
+        state.settings.Whitelist.length
+          ? `\`\`\`${state.settings.Whitelist.map((jid) => utils.whatsapp.jidToName(jid)).join('\n')}\`\`\``
+          : 'Whitelist is empty/inactive.',
       );
-      return;
-    }
+    },
+  },
+  setdcprefix: {
+    description: 'Set a static prefix for Discord messages.',
+    options: [
+      {
+        name: 'prefix',
+        description: 'Prefix text. Leave empty to reset to username.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: false,
+      },
+    ],
+    async execute(ctx) {
+      const prefix = ctx.getStringOption('prefix') ?? ctx.argString;
+      if (prefix) {
+        state.settings.DiscordPrefixText = prefix;
+        await ctx.reply(`Discord prefix is set to ${prefix}!`);
+      } else {
+        state.settings.DiscordPrefixText = null;
+        await ctx.reply('Discord prefix is set to your discord username!');
+      }
+    },
+  },
+  enabledcprefix: {
+    description: 'Enable Discord username prefixes.',
+    async execute(ctx) {
+      state.settings.DiscordPrefix = true;
+      await ctx.reply('Discord username prefix enabled!');
+    },
+  },
+  disabledcprefix: {
+    description: 'Disable Discord username prefixes.',
+    async execute(ctx) {
+      state.settings.DiscordPrefix = false;
+      await ctx.reply('Discord username prefix disabled!');
+    },
+  },
+  enablewaprefix: {
+    description: 'Enable WhatsApp name prefixes on Discord.',
+    async execute(ctx) {
+      state.settings.WAGroupPrefix = true;
+      await ctx.reply('WhatsApp name prefix enabled!');
+    },
+  },
+  disablewaprefix: {
+    description: 'Disable WhatsApp name prefixes on Discord.',
+    async execute(ctx) {
+      state.settings.WAGroupPrefix = false;
+      await ctx.reply('WhatsApp name prefix disabled!');
+    },
+  },
+  enablewaupload: {
+    description: 'Enable uploading attachments to WhatsApp.',
+    async execute(ctx) {
+      state.settings.UploadAttachments = true;
+      await ctx.reply('Enabled uploading files to WhatsApp!');
+    },
+  },
+  disablewaupload: {
+    description: 'Disable uploading attachments to WhatsApp.',
+    async execute(ctx) {
+      state.settings.UploadAttachments = false;
+      await ctx.reply('Disabled uploading files to WhatsApp!');
+    },
+  },
+  enabledeletes: {
+    description: 'Enable message delete syncing.',
+    async execute(ctx) {
+      state.settings.DeleteMessages = true;
+      await ctx.reply('Enabled message delete syncing!');
+    },
+  },
+  disabledeletes: {
+    description: 'Disable message delete syncing.',
+    async execute(ctx) {
+      state.settings.DeleteMessages = false;
+      await ctx.reply('Disabled message delete syncing!');
+    },
+  },
+  enablereadreceipts: {
+    description: 'Enable read receipts.',
+    async execute(ctx) {
+      state.settings.ReadReceipts = true;
+      await ctx.reply('Enabled read receipts!');
+    },
+  },
+  disablereadreceipts: {
+    description: 'Disable read receipts.',
+    async execute(ctx) {
+      state.settings.ReadReceipts = false;
+      await ctx.reply('Disabled read receipts!');
+    },
+  },
+  dmreadreceipts: {
+    description: 'Send read receipts via DM.',
+    async execute(ctx) {
+      state.settings.ReadReceiptMode = 'dm';
+      await ctx.reply('Read receipts will be sent via DM.');
+    },
+  },
+  publicreadreceipts: {
+    description: 'Send read receipts as channel replies.',
+    async execute(ctx) {
+      state.settings.ReadReceiptMode = 'public';
+      await ctx.reply('Read receipts will be posted publicly.');
+    },
+  },
+  reactionreadreceipts: {
+    description: 'Send read receipts as reactions.',
+    async execute(ctx) {
+      state.settings.ReadReceiptMode = 'reaction';
+      await ctx.reply('Read receipts will be added as ☑️ reactions.');
+    },
+  },
+  help: {
+    description: 'Show help link.',
+    async execute(ctx) {
+      await ctx.reply('See all the available commands at https://arespawn.github.io/WhatsAppToDiscord/#/commands');
+    },
+  },
+  resync: {
+    description: 'Re-sync WhatsApp contacts and groups.',
+    options: [
+      {
+        name: 'rename',
+        description: 'Rename channels to match WhatsApp names.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: false,
+      },
+    ],
+    async execute(ctx) {
+      await ctx.defer();
+      await state.waClient.authState.keys.set({
+        'app-state-sync-version': { critical_unblock_low: null },
+      });
+      await state.waClient.resyncAppState(['critical_unblock_low']);
+      for (const [jid, attributes] of Object.entries(await state.waClient.groupFetchAllParticipating())) { state.waClient.contacts[jid] = attributes.subject; }
+      const shouldRename = ctx.getBooleanOption('rename') ?? (ctx.lowerArgs || []).includes('rename');
+      if (shouldRename) {
+        try {
+          await utils.discord.renameChannels();
+        } catch (err) {
+          state.logger?.error(err);
+        }
+      }
+      await ctx.reply('Re-synced!');
+    },
+  },
+  enablelocaldownloads: {
+    description: 'Enable local downloads for large files.',
+    async execute(ctx) {
+      state.settings.LocalDownloads = true;
+      await ctx.reply('Enabled local downloads. You can now download files larger than Discord\'s upload limit.');
+    },
+  },
+  disablelocaldownloads: {
+    description: 'Disable local downloads for large files.',
+    async execute(ctx) {
+      state.settings.LocalDownloads = false;
+      await ctx.reply('Disabled local downloads. You won\'t be able to download files larger than Discord\'s upload limit.');
+    },
+  },
+  getdownloadmessage: {
+    description: 'Show the current download message template.',
+    async execute(ctx) {
+      await ctx.reply(`Download message format is set to "${state.settings.LocalDownloadMessage}"`);
+    },
+  },
+  setdownloadmessage: {
+    description: 'Update the download message template.',
+    options: [
+      {
+        name: 'message',
+        description: 'Template text.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const message = ctx.getStringOption('message') ?? ctx.argString;
+      if (!message) {
+        await ctx.reply('Please provide a template. Usage: `setDownloadMessage <your message here>`');
+        return;
+      }
+      state.settings.LocalDownloadMessage = message;
+      await ctx.reply(`Set download message format to "${state.settings.LocalDownloadMessage}"`);
+    },
+  },
+  getdownloaddir: {
+    description: 'Show the download directory.',
+    async execute(ctx) {
+      await ctx.reply(`Download path is set to "${state.settings.DownloadDir}"`);
+    },
+  },
+  setdownloaddir: {
+    description: 'Set the download directory.',
+    options: [
+      {
+        name: 'path',
+        description: 'Directory path for downloads.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const dir = ctx.getStringOption('path') ?? ctx.argString;
+      if (!dir) {
+        await ctx.reply('Please provide a path. Usage: `setDownloadDir <desired save path>`');
+        return;
+      }
+      state.settings.DownloadDir = dir;
+      await ctx.reply(`Set download path to "${state.settings.DownloadDir}"`);
+    },
+  },
+  setdownloadlimit: {
+    description: 'Set the local download directory size limit in GB.',
+    options: [
+      {
+        name: 'size',
+        description: 'Size limit in gigabytes.',
+        type: ApplicationCommandOptionTypes.NUMBER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const gb = ctx.getNumberOption('size') ?? parseFloat(ctx.rawArgs?.[0]);
+      if (!Number.isNaN(gb) && gb >= 0) {
+        state.settings.DownloadDirLimitGB = gb;
+        await ctx.reply(`Set download directory size limit to ${gb} GB.`);
+      } else {
+        await ctx.reply('Please provide a valid size in gigabytes.');
+      }
+    },
+  },
+  setfilesizelimit: {
+    description: 'Set the Discord upload size limit used by the bot.',
+    options: [
+      {
+        name: 'bytes',
+        description: 'Maximum size in bytes.',
+        type: ApplicationCommandOptionTypes.INTEGER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const size = ctx.getIntegerOption('bytes') ?? parseInt(ctx.rawArgs?.[0], 10);
+      if (!Number.isNaN(size) && size > 0) {
+        state.settings.DiscordFileSizeLimit = size;
+        await ctx.reply(`Set Discord file size limit to ${size} bytes.`);
+      } else {
+        await ctx.reply('Please provide a valid size in bytes.');
+      }
+    },
+  },
+  enablelocaldownloadserver: {
+    description: 'Start the local download server.',
+    async execute(ctx) {
+      state.settings.LocalDownloadServer = true;
+      utils.ensureDownloadServer();
+      await ctx.reply(`Enabled local download server on port ${state.settings.LocalDownloadServerPort}.`);
+    },
+  },
+  disablelocaldownloadserver: {
+    description: 'Stop the local download server.',
+    async execute(ctx) {
+      state.settings.LocalDownloadServer = false;
+      utils.stopDownloadServer();
+      await ctx.reply('Disabled local download server.');
+    },
+  },
+  setlocaldownloadserverport: {
+    description: 'Set the download server port.',
+    options: [
+      {
+        name: 'port',
+        description: 'Port number.',
+        type: ApplicationCommandOptionTypes.INTEGER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const port = ctx.getIntegerOption('port') ?? parseInt(ctx.rawArgs?.[0], 10);
+      if (!Number.isNaN(port) && port > 0 && port <= 65535) {
+        state.settings.LocalDownloadServerPort = port;
+        utils.stopDownloadServer();
+        utils.ensureDownloadServer();
+        await ctx.reply(`Set local download server port to ${port}.`);
+      } else {
+        await ctx.reply('Please provide a valid port.');
+      }
+    },
+  },
+  setlocaldownloadserverhost: {
+    description: 'Set the download server host.',
+    options: [
+      {
+        name: 'host',
+        description: 'Hostname or IP for the download server.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const host = ctx.getStringOption('host') ?? ctx.rawArgs?.[0];
+      if (host) {
+        state.settings.LocalDownloadServerHost = host;
+        utils.stopDownloadServer();
+        utils.ensureDownloadServer();
+        await ctx.reply(`Set local download server host to ${host}.`);
+      } else {
+        await ctx.reply('Please provide a host name or IP.');
+      }
+    },
+  },
+  enablehttpsdownloadserver: {
+    description: 'Enable HTTPS for the local download server.',
+    async execute(ctx) {
+      state.settings.UseHttps = true;
+      utils.stopDownloadServer();
+      utils.ensureDownloadServer();
+      await ctx.reply('Enabled HTTPS for local download server.');
+    },
+  },
+  disablehttpsdownloadserver: {
+    description: 'Disable HTTPS for the local download server.',
+    async execute(ctx) {
+      state.settings.UseHttps = false;
+      utils.stopDownloadServer();
+      utils.ensureDownloadServer();
+      await ctx.reply('Disabled HTTPS for local download server.');
+    },
+  },
+  sethttpscert: {
+    description: 'Set HTTPS certificate paths for the download server.',
+    options: [
+      {
+        name: 'key_path',
+        description: 'Path to the TLS key.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+      {
+        name: 'cert_path',
+        description: 'Path to the TLS certificate.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const key = ctx.getStringOption('key_path') ?? ctx.rawArgs?.[0];
+      const cert = ctx.getStringOption('cert_path') ?? ctx.rawArgs?.[1];
+      if (!key || !cert) {
+        await ctx.reply('Usage: `setHttpsCert <key> <cert>`');
+        return;
+      }
+      [state.settings.HttpsKeyPath, state.settings.HttpsCertPath] = [key, cert];
+      utils.stopDownloadServer();
+      utils.ensureDownloadServer();
+      await ctx.reply(`Set HTTPS key path to ${key} and cert path to ${cert}.`);
+    },
+  },
+  enablepublishing: {
+    description: 'Publish messages sent to news channels automatically.',
+    async execute(ctx) {
+      state.settings.Publish = true;
+      await ctx.reply('Enabled publishing messages sent to news channels.');
+    },
+  },
+  disablepublishing: {
+    description: 'Stop publishing messages sent to news channels automatically.',
+    async execute(ctx) {
+      state.settings.Publish = false;
+      await ctx.reply('Disabled publishing messages sent to news channels.');
+    },
+  },
+  enablechangenotifications: {
+    description: 'Enable profile/status change notifications.',
+    async execute(ctx) {
+      state.settings.ChangeNotifications = true;
+      await ctx.reply('Enabled profile picture change and status update notifications.');
+    },
+  },
+  disablechangenotifications: {
+    description: 'Disable profile/status change notifications.',
+    async execute(ctx) {
+      state.settings.ChangeNotifications = false;
+      await ctx.reply('Disabled profile picture change and status update notifications.');
+    },
+  },
+  autosaveinterval: {
+    description: 'Set the auto-save interval (seconds).',
+    options: [
+      {
+        name: 'seconds',
+        description: 'Number of seconds between saves.',
+        type: ApplicationCommandOptionTypes.INTEGER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const seconds = ctx.getIntegerOption('seconds') ?? parseInt(ctx.rawArgs?.[0], 10);
+      if (Number.isNaN(seconds)) {
+        await ctx.reply("Usage: autoSaveInterval <seconds>\nExample: autoSaveInterval 60");
+        return;
+      }
+      state.settings.autoSaveInterval = seconds;
+      await ctx.reply(`Changed auto save interval to ${seconds}.`);
+    },
+  },
+  lastmessagestorage: {
+    description: 'Set how many recent messages can be edited/deleted.',
+    options: [
+      {
+        name: 'size',
+        description: 'Number of messages to keep.',
+        type: ApplicationCommandOptionTypes.INTEGER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const size = ctx.getIntegerOption('size') ?? parseInt(ctx.rawArgs?.[0], 10);
+      if (Number.isNaN(size)) {
+        await ctx.reply("Usage: lastMessageStorage <size>\nExample: lastMessageStorage 1000");
+        return;
+      }
+      state.settings.lastMessageStorage = size;
+      await ctx.reply(`Changed last message storage size to ${size}.`);
+    },
+  },
+  oneway: {
+    description: 'Set one-way communication mode.',
+    options: [
+      {
+        name: 'direction',
+        description: 'Choose direction or disable one-way.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+        choices: [
+          { name: 'discord', value: 'discord' },
+          { name: 'whatsapp', value: 'whatsapp' },
+          { name: 'disabled', value: 'disabled' },
+        ],
+      },
+    ],
+    async execute(ctx) {
+      const direction = ctx.getStringOption('direction') ?? ctx.rawArgs?.[0];
+      if (!direction || !['discord', 'whatsapp', 'disabled'].includes(direction)) {
+        await ctx.reply("Usage: oneWay <discord|whatsapp|disabled>\nExample: oneWay whatsapp");
+        return;
+      }
 
-    await controlChannel.send('Updating...');
-    const success = await utils.updater.update(state.updateInfo.version);
-    if (!success) {
-      await controlChannel.send('Update failed. Check logs.');
-      return;
-    }
+      if (direction === 'disabled') {
+        state.settings.oneWay = 0b11;
+        await ctx.reply('Two way communication is enabled.');
+      } else if (direction === 'whatsapp') {
+        state.settings.oneWay = 0b10;
+        await ctx.reply('Messages will be only sent to WhatsApp.');
+      } else if (direction === 'discord') {
+        state.settings.oneWay = 0b01;
+        await ctx.reply('Messages will be only sent to Discord.');
+      }
+    },
+  },
+  redirectwebhooks: {
+    description: 'Toggle redirecting webhook messages to WhatsApp.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether webhook messages should be redirected.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const enabledOption = ctx.getBooleanOption('enabled');
+      const raw = ctx.rawArgs?.[0]?.toLowerCase?.();
+      const rawValue = raw === 'yes' ? true : raw === 'no' ? false : null;
+      const enabled = enabledOption ?? rawValue;
+      if (enabled == null) {
+        await ctx.reply("Usage: redirectWebhooks <yes|no>\nExample: redirectWebhooks yes");
+        return;
+      }
 
-    await controlChannel.send('Update downloaded. Restarting...');
-    await fs.promises.writeFile('restart.flag', '');
-    process.exit();
+      state.settings.redirectWebhooks = Boolean(enabled);
+      await ctx.reply(`Redirecting webhooks is set to ${state.settings.redirectWebhooks}.`);
+    },
   },
-  async checkupdate() {
-    await utils.updater.run(state.version, { prompt: false });
-    if (state.updateInfo) {
-      const message = utils.updater.formatUpdateMessage(state.updateInfo);
-      await utils.discord.sendPartitioned(controlChannel, message);
-    } else {
-      await controlChannel.send('No update available.');
-    }
+  updatechannel: {
+    description: 'Switch update channel between stable and unstable.',
+    options: [
+      {
+        name: 'channel',
+        description: 'Release channel.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+        choices: [
+          { name: 'stable', value: 'stable' },
+          { name: 'unstable', value: 'unstable' },
+        ],
+      },
+    ],
+    async execute(ctx) {
+      const channel = (ctx.getStringOption('channel') ?? ctx.rawArgs?.[0])?.toLowerCase();
+      if (!['stable', 'unstable'].includes(channel)) {
+        await ctx.reply("Usage: updateChannel <stable|unstable>\nExample: updateChannel unstable");
+        return;
+      }
+
+      state.settings.UpdateChannel = channel;
+      await ctx.reply(`Update channel set to ${channel}. Checking for new releases...`);
+      await utils.updater.run(state.version, { prompt: false });
+      if (state.updateInfo) {
+        const message = utils.updater.formatUpdateMessage(state.updateInfo);
+        await ctx.replyPartitioned(message);
+      } else {
+        await ctx.reply('No updates are available on that channel right now.');
+      }
+    },
   },
-  async skipupdate() {
-    state.updateInfo = null;
-    await controlChannel.send('Update skipped.');
-  },
-  async rollback() {
-    const result = await utils.updater.rollback();
-    if (result.success) {
-      await controlChannel.send('Rolled back to the previous packaged binary. Restarting...');
+  update: {
+    description: 'Install the available update.',
+    async execute(ctx) {
+      await ctx.defer();
+      if (!state.updateInfo) {
+        await ctx.reply('No update available.');
+        return;
+      }
+      if (!state.updateInfo.canSelfUpdate) {
+        await ctx.replyPartitioned(
+          `A new ${state.updateInfo.channel || 'stable'} release (${state.updateInfo.version}) is available, but this installation cannot self-update.\n` +
+          'Pull the new image or binary for the requested release and restart the bot.',
+        );
+        return;
+      }
+
+      await ctx.reply('Updating...');
+      const success = await utils.updater.update(state.updateInfo.version);
+      if (!success) {
+        await ctx.reply('Update failed. Check logs.');
+        return;
+      }
+
+      await ctx.reply('Update downloaded. Restarting...');
       await fs.promises.writeFile('restart.flag', '');
       process.exit();
-      return;
-    }
-
-    if (result.reason === 'node') {
-      await utils.discord.sendPartitioned(
-        controlChannel,
-        'Rollback is only available for packaged binaries. To roll back a Docker or source install, pull the previous image/tag and restart.'
-      );
-      return;
-    }
-
-    if (result.reason === 'no-backup') {
-      await controlChannel.send('No previous packaged binary is available to roll back to.');
-      return;
-    }
-
-    await controlChannel.send('Rollback failed. Check logs for details.');
+    },
   },
-  async unknownCommand(message) {
-    await controlChannel.send(`Unknown command: \`${message.content}\`\nType \`help\` to see available commands`);
+  checkupdate: {
+    description: 'Check for updates now.',
+    async execute(ctx) {
+      await ctx.defer();
+      await utils.updater.run(state.version, { prompt: false });
+      if (state.updateInfo) {
+        const message = utils.updater.formatUpdateMessage(state.updateInfo);
+        await ctx.replyPartitioned(message);
+      } else {
+        await ctx.reply('No update available.');
+      }
+    },
+  },
+  skipupdate: {
+    description: 'Clear the current update notification.',
+    async execute(ctx) {
+      state.updateInfo = null;
+      await ctx.reply('Update skipped.');
+    },
+  },
+  rollback: {
+    description: 'Roll back to the previous packaged binary.',
+    async execute(ctx) {
+      await ctx.defer();
+      const result = await utils.updater.rollback();
+      if (result.success) {
+        await ctx.reply('Rolled back to the previous packaged binary. Restarting...');
+        await fs.promises.writeFile('restart.flag', '');
+        process.exit();
+        return;
+      }
+
+      if (result.reason === 'node') {
+        await ctx.replyPartitioned(
+          'Rollback is only available for packaged binaries. To roll back a Docker or source install, pull the previous image/tag and restart.'
+        );
+        return;
+      }
+
+      if (result.reason === 'no-backup') {
+        await ctx.reply('No previous packaged binary is available to roll back to.');
+        return;
+      }
+
+      await ctx.reply('Rollback failed. Check logs for details.');
+    },
+  },
+  unknown: {
+    register: false,
+    async execute(ctx) {
+      if (ctx.message) {
+        await ctx.reply(`Unknown command: \`${ctx.message.content}\`\nType \`/help\` to see available commands`);
+      } else {
+        await ctx.reply('Unknown command.');
+      }
+    },
   },
 };
+
+const slashCommands = Object.entries(commandHandlers)
+  .filter(([, def]) => def.register !== false)
+  .map(([name, def]) => ({
+    name,
+    description: def.description || 'No description provided.',
+    options: def.options || [],
+  }));
+
+const buildInviteLink = () => (
+  client?.user?.id
+    ? `https://discordapp.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20application.commands&permissions=${BOT_PERMISSIONS}`
+    : null
+);
+
+const registerSlashCommands = async () => {
+  try {
+    const guild = await utils.discord.getGuild();
+    if (!guild) {
+      state.logger?.error('Failed to load guild while registering commands.');
+      return;
+    }
+    await guild.commands.set(slashCommands);
+  } catch (err) {
+    state.logger?.error({ err }, 'Failed to register slash commands');
+    const missingAccess = err?.code === 50001 || /Missing Access/i.test(err?.message || '');
+    if (missingAccess && !slashRegisterWarned) {
+      slashRegisterWarned = true;
+      const link = buildInviteLink();
+      const warning = link
+        ? `Slash commands could not be registered (missing application.commands scope). Re-invite the bot with this link:\n${link}`
+        : 'Slash commands could not be registered (missing application.commands scope). Re-invite the bot with both bot and application.commands scopes.';
+      controlChannel?.send(warning).catch(() => {});
+    }
+  }
+};
+
+const executeCommand = async (name, ctx) => {
+  const handler = commandHandlers[name] || commandHandlers.unknown;
+  await handler.execute(ctx);
+};
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isCommand?.() && !interaction.isChatInputCommand?.()) {
+    return;
+  }
+
+  const responder = new CommandResponder({ interaction, channel: interaction.channel });
+  await responder.defer();
+  const ctx = new CommandContext({ interaction, responder });
+  const commandName = interaction.commandName?.toLowerCase();
+  await executeCommand(commandName, ctx);
+});
 
 client.on('messageCreate', async (message) => {
   if (message.author === client.user || message.applicationId === client.user.id || (message.webhookId != null && !state.settings.redirectWebhooks)) {
     return;
   }
 
-  if (message.channel === controlChannel) {
-    const command = message.content.toLowerCase().split(' ');
-    await (commands[command[0]] || commands.unknownCommand)(message, command.slice(1));
-  } else {
-    const jid = utils.discord.channelIdToJid(message.channel.id);
-    if (jid == null) {
-      return;
-    }
-
-    state.waClient.ev.emit('discordMessage', { jid, message });
+  if (message.channel.id === state.settings.ControlChannelID) {
+    const [commandNameRaw, ...rawArgs] = message.content.trim().split(/\s+/);
+    const commandName = (commandNameRaw || '').toLowerCase();
+    const responder = new CommandResponder({ channel: controlChannel || message.channel });
+    const ctx = new CommandContext({
+      message,
+      responder,
+      rawArgs,
+      lowerArgs: rawArgs.map((arg) => arg.toLowerCase()),
+    });
+    await executeCommand(commandName, ctx);
+    return;
   }
+
+  const jid = utils.discord.channelIdToJid(message.channel.id);
+  if (jid == null) {
+    return;
+  }
+
+  state.waClient.ev.emit('discordMessage', { jid, message });
 });
 
 client.on('messageUpdate', async (_, message) => {

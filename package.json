@@ -1,6 +1,6 @@
 {
   "name": "wa2dc",
-  "version": "2.0.0-alpha.4",
+  "version": "2.0.0-alpha.5",
   "description": "WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Discord and WhatsApp",
   "type": "module",
   "main": "src/index.js",

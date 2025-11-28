@@ -92,7 +92,9 @@ const setup = {
     return new Promise((resolve) => {
       const client = new Client({ intents: [Intents.FLAGS.GUILDS] });
       client.once('ready', () => {
-        state.logger?.info(`Invite the bot using the following link: https://discordapp.com/oauth2/authorize?client_id=${client.user.id}&scope=bot&permissions=536879120`);
+        state.logger?.info(
+          `Invite the bot using the following link: https://discordapp.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20application.commands&permissions=536879120`,
+        );
       });
       client.once('guildCreate', async (guild) => {
         const category = await guild.channels.create('whatsapp', {
