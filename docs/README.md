@@ -4,7 +4,7 @@ WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Di
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by [arespawn](https://github.com/arespawn).
 
-> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.5` introduces the Baileys 7 migration and is **not yet stable**. Expect rapid updates and potential breaking changes until a stable release lands.
+> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.6` introduces the Baileys 7 migration and is **not yet stable**. Expect rapid updates and potential breaking changes until a stable release lands.
 
 ## Requirements
 
@@ -59,6 +59,7 @@ This keeps you in control of when updates are applied instead of auto-updating.
 ## Troubleshooting
 
 - **Duplicate Discord channels after the LID migration** – If a conversation suddenly starts flowing into a brand-new Discord channel, re-link it back to the original room via the control channel (`link --force <contact> #old-channel`) rather than editing files on disk. The bot will create a webhook inside the existing channel, clean up the stray webhook, and update its saved metadata. If you prefer to move the webhook that already exists in the duplicate channel, run `move #duplicate-channel #old-channel --force` so the bot reuses that webhook and deletes the redundant channel mapping for you.
+- **Repeated "Connection was lost" logs** – WhatsApp occasionally drops the socket with timeout errors. The bot now keeps retrying with exponential backoff instead of deleting the session, so expect control-channel status messages while it reconnects. If the retries never succeed, rescan the QR code to refresh the session.
 
 ## Setup
 
