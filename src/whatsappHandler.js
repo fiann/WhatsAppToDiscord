@@ -87,33 +87,10 @@ const connectToWhatsApp = async (retry = 1) => {
         markOnlineOnConnect: false,
         syncFullHistory: true,
         shouldSyncHistoryMessage: () => true,
-        generateHighQualityLinkPreview: true,
+        generateHighQualityLinkPreview: false,
         browser: ["Firefox (Linux)", "", ""]
     });
     client.contacts = state.contacts;
-    const whatsappTypingStates = new Map();
-
-    const sendDiscordReadReceipt = async (rawMessage, channelJid) => {
-        if ((state.settings.oneWay >> 0 & 1) === 0) return;
-        if (!state.settings.ReadReceipts) return;
-        const msgKey = rawMessage?.key;
-        if (!msgKey?.id || msgKey.fromMe) return;
-        const resolvedJid = utils.whatsapp.formatJid(channelJid || msgKey.remoteJid);
-        if (!resolvedJid) return;
-        const receiptKey = {
-            id: msgKey.id,
-            remoteJid: resolvedJid,
-            fromMe: false,
-        };
-        if (msgKey.participant) {
-            receiptKey.participant = utils.whatsapp.formatJid(msgKey.participant);
-        }
-        try {
-            await client.readMessages([receiptKey]);
-        } catch (err) {
-            state.logger?.warn({ err }, 'Failed to send read receipt to WhatsApp');
-        }
-    };
 
     client.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -187,8 +164,6 @@ const connectToWhatsApp = async (retry = 1) => {
                 const messageType = utils.whatsapp.getMessageType(rawMessage);
                 if (!utils.whatsapp.inWhitelist(rawMessage) || !utils.whatsapp.sentAfterStart(rawMessage) || !messageType) continue;
 
-                const channelJid = await utils.whatsapp.getChannelJid(rawMessage);
-                if (!channelJid) continue;
                 const [nMsgType, message] = utils.whatsapp.getMessage(rawMessage, messageType);
                 state.dcClient.emit('whatsappMessage', {
                     id: utils.whatsapp.getId(rawMessage),
@@ -197,12 +172,11 @@ const connectToWhatsApp = async (retry = 1) => {
                     quote: await utils.whatsapp.getQuote(rawMessage),
                     file: await utils.whatsapp.getFile(rawMessage, messageType),
                     profilePic: await utils.whatsapp.getProfilePic(rawMessage),
-                    channelJid,
+                    channelJid: await utils.whatsapp.getChannelJid(rawMessage),
                     isGroup: utils.whatsapp.isGroup(rawMessage),
                     isForwarded: utils.whatsapp.isForwarded(message),
                     isEdit: messageType === 'editedMessage'
                 });
-                await sendDiscordReadReceipt(rawMessage, channelJid);
                 const ts = utils.whatsapp.getTimestamp(rawMessage);
                 if (ts > state.startTime) state.startTime = ts;
             }
@@ -306,16 +280,16 @@ const connectToWhatsApp = async (retry = 1) => {
 
     client.ev.on('presence.update', async ({ id, presences }) => {
         if (!utils.whatsapp.inWhitelist({ chatId: id })) return;
-        const normalizedJid = utils.whatsapp.formatJid(id);
-        if (!normalizedJid) return;
-        const isTyping = Object.values(presences || {}).some((presence) =>
-            ['composing', 'recording'].includes(presence?.lastKnownPresence));
-        if (whatsappTypingStates.get(normalizedJid) === isTyping) return;
-        whatsappTypingStates.set(normalizedJid, isTyping);
-        state.dcClient.emit('whatsappTyping', {
-            jid: normalizedJid,
-            isTyping,
-        });
+        for (const presence of Object.values(presences)) {
+            const isTyping = ['composing', 'recording'].includes(presence?.lastKnownPresence);
+            if (isTyping) {
+                state.dcClient.emit('whatsappTyping', {
+                    jid: utils.whatsapp.formatJid(id),
+                    isTyping: true,
+                });
+                break;
+            }
+        }
     });
 
     client.ws.on(`CB:notification,type:status,set`, async (update) => {
@@ -367,7 +341,7 @@ const connectToWhatsApp = async (retry = 1) => {
         if (state.settings.UploadAttachments && message.attachments.size) {
             let first = true;
             for (const file of message.attachments.values()) {
-                const doc = await utils.whatsapp.createDocumentContent(file);
+                const doc = utils.whatsapp.createDocumentContent(file);
                 if (first) {
                     if (text || mentionJids.length) doc.caption = text;
                     if (mentionJids.length) doc.mentions = mentionJids;

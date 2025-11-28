@@ -95,11 +95,11 @@ When disabled, deleting a message on one platform will not affect the other, kee
 - Format: `disableDeletes`
 
 ## enableReadReceipts
-Enables read receipts so you are notified when WhatsApp users read your messages and automatically marks incoming WhatsApp messages as read once they are relayed to Discord.
+Enables read receipts so you are notified when WhatsApp users read your messages.
 - Format: `enableReadReceipts`
 
 ## disableReadReceipts
-Disables read receipts and stops marking WhatsApp messages as read when viewed via Discord.
+Disables read receipts.
 - Format: `disableReadReceipts`
 
 Only one delivery style can be active at a time. Use the following commands to switch between DM, public reply, or reaction-based read receipts. Webhook-authored Discord messages always receive a ☑️ reaction whenever read receipts are enabled so they can be acknowledged without sending DMs.
