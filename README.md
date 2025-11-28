@@ -4,7 +4,7 @@ WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Di
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now maintained by [arespawn](https://github.com/arespawn) with the blessing of the previous author.
 
-> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.5` ships the Baileys 7 migration and is considered **unstable**. Expect rapid changes and breaking issues until a stable tag is published.
+> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.6` ships the Baileys 7 migration and is considered **unstable**. Expect rapid changes and breaking issues until a stable tag is published.
 
 ## Requirements
 
@@ -58,11 +58,12 @@ This keeps you in control of when updates are applied instead of auto-updating.
 ## Troubleshooting
 
 - **Duplicate Discord channels after the LID migration** – If a chat suddenly starts posting to a brand-new Discord channel, re-link it back to the original room from the control channel instead of editing `storage/chats.json` by hand. Run `link --force <contact> #old-channel` (or `start <jid> #old-channel` for a brand-new contact) and the bot will recreate its webhook inside the existing Discord channel, delete the stray webhook, and update the saved chat metadata. If you just want to repoint the webhook that already lives inside the duplicate channel, run `move #duplicate-channel #old-channel --force` to move the WhatsApp conversation (and clean up the redundant webhook) in one step.
+- **Repeated "Connection was lost" logs** – WhatsApp sometimes drops the Web session with timeout errors. The bot now keeps retrying with exponential backoff instead of giving up after a handful of attempts, so you will see status updates in the control channel while it recovers. If it keeps failing for an extended time, rescan the QR code to create a fresh session.
 
 ### Automatic updates
 
 Images are published to the GitHub Container Registry on every release, with
-immutable version tags (for example, `v2.0.0-alpha.5`) and moving channels:
+immutable version tags (for example, `v2.0.0-alpha.6`) and moving channels:
 
 - `stable` (also published as `latest`) tracks the newest stable release.
 - `unstable` tracks the newest prerelease.

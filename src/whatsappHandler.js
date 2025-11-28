@@ -13,6 +13,21 @@ import state from './state.js';
 
 let authState;
 let saveState;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const formatDisconnectReason = (statusCode) => {
+    if (typeof statusCode !== 'number') return 'unknown';
+    const label = DisconnectReason[statusCode];
+    return label ? `${label} (${statusCode})` : `code ${statusCode}`;
+};
+const getReconnectDelayMs = (retry) => {
+    if (retry <= 3) {
+        return 0;
+    }
+    const slowAttempt = retry - 3;
+    const baseDelay = 5000;
+    const maxDelay = 60000;
+    return Math.min(baseDelay * 2 ** (slowAttempt - 1), maxDelay);
+};
 
 const ensureSignalStoreSupport = async (keyStore) => {
     if (!keyStore?.get || !keyStore?.set) {
@@ -83,7 +98,7 @@ const connectToWhatsApp = async (retry = 1) => {
             utils.whatsapp.sendQR(qr);
         }
         if (connection === 'close') {
-            state.logger.error(lastDisconnect.error);
+            state.logger.error(lastDisconnect?.error);
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession) {
                 await controlChannel.send('WhatsApp session invalid. Please rescan the QR code.');
@@ -91,19 +106,17 @@ const connectToWhatsApp = async (retry = 1) => {
                 await actions.start(true);
                 return;
             }
-            if (retry <= 3) {
-                await controlChannel.send(`WhatsApp connection failed! Trying to reconnect! Retry #${retry}`);
-                await connectToWhatsApp(retry + 1);
-            } else if (retry <= 5) {
-                const delay = (retry - 3) * 10;
-                await controlChannel.send(`WhatsApp connection failed! Waiting ${delay} seconds before trying to reconnect! Retry #${retry}.`);
-                await new Promise((resolve) => { setTimeout(resolve, delay * 1000); });
-                await connectToWhatsApp(retry + 1);
+            const delayMs = getReconnectDelayMs(retry);
+            const humanReason = formatDisconnectReason(statusCode);
+            if (delayMs === 0) {
+                await controlChannel?.send(`WhatsApp connection failed (${humanReason}). Trying to reconnect! Retry #${retry}`);
             } else {
-                await controlChannel.send('Connection failed 5 times. Please rescan the QR code.');
-                await utils.whatsapp.deleteSession();
-                await actions.start(true);
+                const delaySeconds = Math.round(delayMs / 1000);
+                await controlChannel?.send(`WhatsApp connection failed (${humanReason}). Waiting ${delaySeconds} seconds before trying to reconnect! Retry #${retry}.`);
+                await sleep(delayMs);
             }
+            await connectToWhatsApp(retry + 1);
+            return;
         } else if (connection === 'open') {
             state.waClient = client;
             // eslint-disable-next-line no-param-reassign
