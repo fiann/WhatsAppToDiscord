@@ -82,16 +82,6 @@ otherwise `stable` is used.
   yourself (for example, `docker compose pull wa2dc && docker compose up -d
   wa2dc`). Pinning a specific tag lets you roll back quickly if something breaks.
 
-## Release workflow
-
-- Use the **Build and Release Binaries** workflow to publish a new release. Pick
-  `stable` or `unstable` for the channel; unstable runs are marked as
-  prereleases and do not become the latest release.
-- Docker images are published automatically on release events with
-  channel-appropriate tags (`stable`/`latest` or `unstable` plus the version).
-  You can also trigger the **Build and Push Docker Image** workflow manually to
-  republish a specific tag.
-
 ---
 
 For setup and commands, check out the [documentation](https://arespawn.github.io/WhatsAppToDiscord/)!
