@@ -35,12 +35,11 @@
   },
   "pkg": {
     "scripts": [
-      "node_modules/jimp/dist/**/*.js",
-      "node_modules/@jimp/**/dist/**/*.js"
+      "node_modules/jimp/**/*",
+      "node_modules/@jimp/**/*"
     ],
     "assets": [
-      "node_modules/jimp/fonts/**/*",
-      "node_modules/@jimp/**/fonts/**/*"
+      "node_modules/jimp/fonts/**/*"
     ]
   },
   "overrides": {
