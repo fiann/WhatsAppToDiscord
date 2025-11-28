@@ -11,12 +11,14 @@ import { pathToFileURL } from 'url';
 import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
+import { Jimp } from 'jimp';
 
 import state from './state.js';
 
 const { Webhook, MessageAttachment } = discordJs;
 
 const downloadTokens = new Map();
+const MEDIA_THUMBNAIL_MAX_DIMENSION = 64;
 
 function ensureWebhookReplySupport(webhook) {
   if (!webhook) return webhook;
@@ -1546,14 +1548,34 @@ const whatsapp = {
       state.contacts[targetId] = name;
     }
   },
-  createDocumentContent(attachment) {
+  async generateAttachmentThumbnail(attachment) {
+    const sourceUrl = attachment?.proxyURL || attachment?.url;
+    if (!sourceUrl) return null;
+    try {
+      const image = await Jimp.read(sourceUrl);
+      image.scaleToFit(MEDIA_THUMBNAIL_MAX_DIMENSION, MEDIA_THUMBNAIL_MAX_DIMENSION);
+      image.quality(60);
+      return await image.getBufferAsync(Jimp.MIME_JPEG);
+    } catch (err) {
+      state.logger?.debug({ err, sourceUrl }, 'Failed to generate WhatsApp media thumbnail');
+      return null;
+    }
+  },
+  async createDocumentContent(attachment) {
     let contentType = attachment.contentType?.split('/')?.[0] || 'application';
-    contentType = ['image', 'video', 'audio'].includes(contentType) ? contentType : 'document';
+    const supportedTypes = ['image', 'video', 'audio', 'sticker'];
+    contentType = supportedTypes.includes(contentType) ? contentType : 'document';
     const documentContent = {};
     if (contentType === 'document') {
       documentContent['mimetype'] = attachment.contentType?.split(';')?.[0] || 'application/octet-stream';
     }
     documentContent[contentType] = { url: attachment.url };
+    if (['image', 'sticker'].includes(contentType)) {
+      const thumbnail = await this.generateAttachmentThumbnail(attachment);
+      if (thumbnail) {
+        documentContent[contentType].jpegThumbnail = thumbnail;
+      }
+    }
     if (contentType === 'document') {
       documentContent.fileName = attachment.name;
     }
