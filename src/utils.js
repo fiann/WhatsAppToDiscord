@@ -11,6 +11,7 @@ import { pathToFileURL } from 'url';
 import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
+import { Jimp } from 'jimp';
 
 import state from './state.js';
 
@@ -18,19 +19,6 @@ const { Webhook, MessageAttachment } = discordJs;
 
 const downloadTokens = new Map();
 const MEDIA_THUMBNAIL_MAX_DIMENSION = 64;
-let jimpLoaderPromise;
-
-const getJimp = async () => {
-  if (!jimpLoaderPromise) {
-    jimpLoaderPromise = import('jimp')
-      .then((module) => module?.Jimp ? module : null)
-      .catch((err) => {
-        state.logger?.warn({ err }, 'Failed to load Jimp. WhatsApp thumbnails will be skipped.');
-        return null;
-      });
-  }
-  return jimpLoaderPromise;
-};
 
 function ensureWebhookReplySupport(webhook) {
   if (!webhook) return webhook;
@@ -1563,13 +1551,6 @@ const whatsapp = {
   async generateAttachmentThumbnail(attachment) {
     const sourceUrl = attachment?.proxyURL || attachment?.url;
     if (!sourceUrl) return null;
-
-    const jimpModule = await getJimp();
-    if (!jimpModule?.Jimp) {
-      return null;
-    }
-
-    const { Jimp } = jimpModule;
     try {
       const image = await Jimp.read(sourceUrl);
       image.scaleToFit(MEDIA_THUMBNAIL_MAX_DIMENSION, MEDIA_THUMBNAIL_MAX_DIMENSION);
