@@ -14,7 +14,7 @@ if (!globalThis.crypto) {
 }
 
 (async () => {
-    const version = 'v2.0.0-alpha.3';
+    const version = 'v2.0.0-alpha.4';
   state.version = version;
   const streams = [
     { stream: pino.destination('logs.txt') },
@@ -141,24 +141,16 @@ if (!globalThis.crypto) {
 
   if (state.updateInfo) {
     const ctrl = await utils.discord.getControlChannel();
-    await utils.discord.sendPartitioned(
-      ctrl,
-      `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
-      `See ${state.updateInfo.url}\n` +
-      `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`
-    );
+    const message = utils.updater.formatUpdateMessage(state.updateInfo);
+    await utils.discord.sendPartitioned(ctrl, message);
   }
 
   setInterval(async () => {
     await utils.updater.run(version, { prompt: false });
     if (state.updateInfo) {
       const ch = await utils.discord.getControlChannel();
-      await utils.discord.sendPartitioned(
-        ch,
-        `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
-        `See ${state.updateInfo.url}\n` +
-        `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`
-      );
+      const message = utils.updater.formatUpdateMessage(state.updateInfo);
+      await utils.discord.sendPartitioned(ch, message);
     }
   }, 2 * 24 * 60 * 60 * 1000);
 

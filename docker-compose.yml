@@ -1,17 +1,11 @@
 name: wa2dc
 services:
   wa2dc:
-    image: ghcr.io/arespawn/whatsapptodiscord:latest
+    # Use :unstable if you explicitly want prerelease builds
+    image: ghcr.io/arespawn/whatsapptodiscord:stable
     container_name: wa2dc
     volumes:
       - ./storage:/usr/local/WA2DC/storage
     env_file:
       - .env
     restart: unless-stopped
-
-  watchtower:
-    image: containrrr/watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    command: --interval 300 wa2dc

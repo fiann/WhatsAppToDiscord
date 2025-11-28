@@ -233,13 +233,22 @@ Replies back with *"Pong <Now - Time Message Sent>"ms*. It basically shows the b
 - Format: `ping`
 
 ## update
-Downloads and installs the latest version when the bot notifies you that a new release is available. The notification message also includes a link to the GitHub release so you can review the changes.
+Downloads and installs the latest version when running a packaged binary. Docker/source installs will still post the release link and changelog but expect you to pull the new image and restart manually.
 - Format: `update`
 
+## updateChannel
+Switches between the `stable` and `unstable` release channels for update notifications.
+- Format: `updateChannel <stable|unstable>`
+- Example: `updateChannel unstable`
+
 ## checkUpdate
-Manually checks if a new version is available and posts the result in the control channel.
+Manually checks if a new version is available on the configured channel (`WA2DC_UPDATE_CHANNEL`, defaults to `stable`) and posts the result in the control channel.
 - Format: `checkUpdate`
 
 ## skipUpdate
 Clears the current update notification without installing anything.
 - Format: `skipUpdate`
+
+## rollback
+Rolls back to the previous packaged binary if one is available (requires packaged install).
+- Format: `rollback`

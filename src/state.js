@@ -29,6 +29,8 @@ const state = {
     DeleteMessages: true,
     ReadReceipts: true,
     ReadReceiptMode: 'public',
+    UpdateChannel: 'stable',
+    KeepOldBinary: true,
   },
   dcClient: null,
   waClient: null,

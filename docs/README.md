@@ -4,7 +4,7 @@ WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Di
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by [arespawn](https://github.com/arespawn).
 
-> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.3` introduces the Baileys 7 migration and is **not yet stable**. Expect rapid updates and potential breaking changes until a stable release lands.
+> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.4` introduces the Baileys 7 migration and is **not yet stable**. Expect rapid updates and potential breaking changes until a stable release lands.
 
 ## Requirements
 
@@ -21,7 +21,7 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by 
 - Open Source, you can see, modify and run your own version of the bot!
 - Self Hosted, so your data never leaves your computer
 - Automatically restarts itself if it crashes
-- Restarts automatically after applying updates and checks for new versions every couple of days
+- Checks for updates every couple of days and can apply signed updates on command (packaged builds only)
 
 **Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
 
@@ -37,7 +37,24 @@ Alternatively, you can run the bot using Docker. Copy `.env.example` to `.env`, 
 docker compose up -d
 ```
 
-The compose file mounts the `storage` directory so data is kept between container restarts.
+The compose file mounts the `storage` directory so data is kept between container restarts. It uses the `stable` tag by default; switch to `unstable` if you explicitly want prerelease builds.
+
+To update a running container, pull the new image and recreate the service:
+
+```bash
+docker compose pull wa2dc && docker compose up -d wa2dc
+```
+
+This keeps you in control of when updates are applied instead of auto-updating.
+
+## Updates and release channels
+
+- Images are pushed to the GitHub Container Registry on every release with immutable version tags plus moving `stable` (also `latest`) and `unstable` channels.
+- The bot checks for new releases every couple of days. Set `WA2DC_UPDATE_CHANNEL=unstable` to be notified about prereleases; otherwise it follows the stable channel.
+- Packaged binaries can apply updates after you confirm with the `update` command. Set `WA2DC_KEEP_OLD_BINARY=1` to keep the previous executable as a rollback.
+- Switch channels from the control channel with `updateChannel stable|unstable`.
+- Packaged installs keep the previous binary so you can run `rollback` from the control channel if a release breaks.
+- Docker and source installs only notify you. Review the changelog and pull a new image when you are ready.
 
 ## Troubleshooting
 
