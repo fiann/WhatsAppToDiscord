@@ -33,6 +33,16 @@
     "pkg": "^5.8.1",
     "prettier": "^2.8.8"
   },
+  "pkg": {
+    "scripts": [
+      "node_modules/jimp/dist/**/*.js",
+      "node_modules/@jimp/**/dist/**/*.js"
+    ],
+    "assets": [
+      "node_modules/jimp/fonts/**/*",
+      "node_modules/@jimp/**/fonts/**/*"
+    ]
+  },
   "overrides": {
     "form-data": "4.0.5",
     "sharp": {
