@@ -1,17 +1,12 @@
-import nodeCrypto from 'crypto';
+import './shims.js';
 import pino from 'pino';
 import pretty from 'pino-pretty';
 import fs from 'fs';
-
 import discordHandler from './discordHandler.js';
 import state from './state.js';
 import utils from './utils.js';
 import storage from './storage.js';
 import whatsappHandler from './whatsappHandler.js';
-
-if (!globalThis.crypto) {
-  globalThis.crypto = nodeCrypto.webcrypto;
-}
 
 (async () => {
     const version = 'v2.0.0-alpha.8';
