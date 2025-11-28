@@ -167,7 +167,11 @@ const flushAlbum = async (key) => {
   if (!album) return;
   clearTimeout(album.timer);
   delete pendingAlbums[key];
-  await sendWhatsappMessage(album.message, album.files, album.ids);
+  try {
+    await sendWhatsappMessage(album.message, album.files, album.ids);
+  } catch (err) {
+    state.logger?.error({ err }, 'Failed to forward WhatsApp album to Discord');
+  }
 };
 
 const setControlChannel = async () => {
@@ -210,31 +214,34 @@ client.on('whatsappMessage', async (message) => {
   if ((state.settings.oneWay >> 0 & 1) === 0) {
     return;
   }
+  try {
+    const key = `${message.channelJid}:${message.name}`;
 
-  const key = `${message.channelJid}:${message.name}`;
-
-  if (message.file && !message.isEdit) {
-    if (pendingAlbums[key]) {
-      pendingAlbums[key].files.push(message.file);
-      pendingAlbums[key].ids.push(message.id);
-      clearTimeout(pendingAlbums[key].timer);
-      pendingAlbums[key].timer = setTimeout(() => flushAlbum(key), 500);
+    if (message.file && !message.isEdit) {
+      if (pendingAlbums[key]) {
+        pendingAlbums[key].files.push(message.file);
+        pendingAlbums[key].ids.push(message.id);
+        clearTimeout(pendingAlbums[key].timer);
+        pendingAlbums[key].timer = setTimeout(() => flushAlbum(key), 500);
+        return;
+      }
+      pendingAlbums[key] = {
+        message,
+        files: [message.file],
+        ids: [message.id],
+        timer: setTimeout(() => flushAlbum(key), 500),
+      };
       return;
     }
-    pendingAlbums[key] = {
-      message,
-      files: [message.file],
-      ids: [message.id],
-      timer: setTimeout(() => flushAlbum(key), 500),
-    };
-    return;
-  }
 
-  if (pendingAlbums[key]) {
-    await flushAlbum(key);
-  }
+    if (pendingAlbums[key]) {
+      await flushAlbum(key);
+    }
 
-  await sendWhatsappMessage(message, message.file ? [message.file] : []);
+    await sendWhatsappMessage(message, message.file ? [message.file] : []);
+  } catch (err) {
+    state.logger?.error({ err }, 'Failed to process incoming WhatsApp message');
+  }
 });
 
 client.on('whatsappReaction', async (reaction) => {
@@ -987,30 +994,58 @@ const commands = {
     state.settings.redirectWebhooks = params[0] === "yes";
     await controlChannel.send(`Redirecting webhooks is set to ${state.settings.redirectWebhooks}.`);
   },
+  async updatechannel(_message, params) {
+    if (params.length !== 1) {
+      await controlChannel.send("Usage: updateChannel <stable|unstable>\nExample: updateChannel unstable");
+      return;
+    }
+
+    const channel = params[0].toLowerCase();
+    if (!['stable', 'unstable'].includes(channel)) {
+      await controlChannel.send("Usage: updateChannel <stable|unstable>\nExample: updateChannel unstable");
+      return;
+    }
+
+    state.settings.UpdateChannel = channel;
+    await controlChannel.send(`Update channel set to ${channel}. Checking for new releases...`);
+    await utils.updater.run(state.version, { prompt: false });
+    if (state.updateInfo) {
+      const message = utils.updater.formatUpdateMessage(state.updateInfo);
+      await utils.discord.sendPartitioned(controlChannel, message);
+    } else {
+      await controlChannel.send('No updates are available on that channel right now.');
+    }
+  },
   async update() {
     if (!state.updateInfo) {
       await controlChannel.send('No update available.');
       return;
     }
-    await controlChannel.send('Updating...');
-    const success = await utils.updater.update();
-    if (success) {
-      await controlChannel.send('Update downloaded. Restarting...');
-      await fs.promises.writeFile('restart.flag', '');
-      process.exit();
-    } else {
-      await controlChannel.send('Update failed. Check logs.');
+    if (!state.updateInfo.canSelfUpdate) {
+      await utils.discord.sendPartitioned(
+        controlChannel,
+        `A new ${state.updateInfo.channel || 'stable'} release (${state.updateInfo.version}) is available, but this installation cannot self-update.\n` +
+        'Pull the new image or binary for the requested release and restart the bot.'
+      );
+      return;
     }
+
+    await controlChannel.send('Updating...');
+    const success = await utils.updater.update(state.updateInfo.version);
+    if (!success) {
+      await controlChannel.send('Update failed. Check logs.');
+      return;
+    }
+
+    await controlChannel.send('Update downloaded. Restarting...');
+    await fs.promises.writeFile('restart.flag', '');
+    process.exit();
   },
   async checkupdate() {
     await utils.updater.run(state.version, { prompt: false });
     if (state.updateInfo) {
-      await utils.discord.sendPartitioned(
-        controlChannel,
-        `A new version is available ${state.updateInfo.currVer} -> ${state.updateInfo.version}.\n` +
-        `See ${state.updateInfo.url}\n` +
-        `Changelog: ${state.updateInfo.changes}\nType \`update\` to apply or \`skipUpdate\` to ignore.`
-      );
+      const message = utils.updater.formatUpdateMessage(state.updateInfo);
+      await utils.discord.sendPartitioned(controlChannel, message);
     } else {
       await controlChannel.send('No update available.');
     }
@@ -1018,6 +1053,30 @@ const commands = {
   async skipupdate() {
     state.updateInfo = null;
     await controlChannel.send('Update skipped.');
+  },
+  async rollback() {
+    const result = await utils.updater.rollback();
+    if (result.success) {
+      await controlChannel.send('Rolled back to the previous packaged binary. Restarting...');
+      await fs.promises.writeFile('restart.flag', '');
+      process.exit();
+      return;
+    }
+
+    if (result.reason === 'node') {
+      await utils.discord.sendPartitioned(
+        controlChannel,
+        'Rollback is only available for packaged binaries. To roll back a Docker or source install, pull the previous image/tag and restart.'
+      );
+      return;
+    }
+
+    if (result.reason === 'no-backup') {
+      await controlChannel.send('No previous packaged binary is available to roll back to.');
+      return;
+    }
+
+    await controlChannel.send('Rollback failed. Check logs for details.');
   },
   async unknownCommand(message) {
     await controlChannel.send(`Unknown command: \`${message.content}\`\nType \`help\` to see available commands`);

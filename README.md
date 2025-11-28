@@ -4,7 +4,7 @@ WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Di
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now maintained by [arespawn](https://github.com/arespawn) with the blessing of the previous author.
 
-> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.0` ships the Baileys 7 migration and is considered **unstable**. Expect rapid changes and breaking issues until a stable tag is published.
+> ⚠️ **Alpha release notice:** Version `v2.0.0-alpha.4` ships the Baileys 7 migration and is considered **unstable**. Expect rapid changes and breaking issues until a stable tag is published.
 
 ## Requirements
 
@@ -21,7 +21,7 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now
 - Open Source, you can see, modify and run your own version of the bot!
 - Self Hosted, so your data never leaves your computer
 - Automatically restarts itself if it crashes
-- Restarts automatically after applying updates and checks for new versions every couple of days
+- Checks for updates every couple of days and can apply signed updates on command (packaged builds only)
 
 **Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
 
@@ -44,7 +44,16 @@ docker compose up -d
 ```
 
 The compose file mounts the `storage` directory so data is kept between
-container restarts.
+container restarts. It uses the `stable` tag by default; switch to `unstable`
+if you explicitly want prerelease builds.
+
+To update a running container, pull the new image and recreate the service:
+
+```bash
+docker compose pull wa2dc && docker compose up -d wa2dc
+```
+
+This keeps you in control of when updates are applied instead of auto-updating.
 
 ## Troubleshooting
 
@@ -52,10 +61,26 @@ container restarts.
 
 ### Automatic updates
 
-A pre-built Docker image is published to the GitHub Container Registry on every push to `main`.
-The included compose file uses this image and adds a [Watchtower](https://github.com/containrrr/watchtower)
-service that checks for new versions every few minutes and restarts the bot
-when an update is available.
+Images are published to the GitHub Container Registry on every release, with
+immutable version tags (for example, `v2.0.0-alpha.4`) and moving channels:
+
+- `stable` (also published as `latest`) tracks the newest stable release.
+- `unstable` tracks the newest prerelease.
+
+The bot checks for updates on the chosen channel every couple of days. Set
+`WA2DC_UPDATE_CHANNEL=unstable` if you want to be notified about prereleases;
+otherwise `stable` is used.
+
+- Packaged binaries can download and apply updates after you confirm with the
+  `update` command. Set `WA2DC_KEEP_OLD_BINARY=1` if you want the previous
+  binary to be left on disk for easy rollback.
+- Switch channels from the control channel with `updateChannel stable|unstable`.
+- Packaged installs keep the previous binary so you can run `rollback` from the
+  control channel if a release breaks.
+- Docker and source installs never self-update. When the bot posts an update
+  notice in the control channel, review the changelog and pull the new image
+  yourself (for example, `docker compose pull wa2dc && docker compose up -d
+  wa2dc`). Pinning a specific tag lets you roll back quickly if something breaks.
 
 ---
 

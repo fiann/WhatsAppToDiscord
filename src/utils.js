@@ -143,6 +143,13 @@ const updater = {
 
   currentExeName: process.argv0.split(/[/\\]/).pop(),
 
+  get channel() {
+    const envChannel = process.env.WA2DC_UPDATE_CHANNEL?.toLowerCase();
+    const configuredChannel = (state.settings?.UpdateChannel || '').toLowerCase();
+    const channel = configuredChannel || envChannel;
+    return channel === 'unstable' ? 'unstable' : 'stable';
+  },
+
   async renameOldVersion() {
     const currentPath = this.currentExeName;
     const backupPath = `${currentPath}.oldVersion`;
@@ -169,6 +176,12 @@ const updater = {
   },
 
   cleanOldVersion() {
+    if (
+      process.env.WA2DC_KEEP_OLD_BINARY === '1' ||
+      state.settings?.KeepOldBinary
+    ) {
+      return;
+    }
     fs.rm(`${this.currentExeName}.oldVersion`, { force: true }, () => 0);
   },
 
@@ -202,21 +215,41 @@ const updater = {
     }
   },
 
-  async fetchLatestVersion() {
-    const response = await requests.fetchJson('https://api.github.com/repos/arespawn/WhatsAppToDiscord/releases/latest');
+  async fetchLatestVersion(channel = this.channel) {
+    const response = await requests.fetchJson('https://api.github.com/repos/arespawn/WhatsAppToDiscord/releases?per_page=20');
     if ('error' in response) {
       state.logger.error(response.error);
       return null;
     }
-    if ('tag_name' in response.result && 'body' in response.result) {
-      return {
-        version: response.result.tag_name,
-        changes: response.result.body,
-        url: response.result.html_url,
-      };
+
+    const releases = Array.isArray(response.result)
+      ? response.result.filter((release) => !release.draft)
+      : [];
+
+    if (!releases.length) {
+      state.logger.error('No releases found when checking for updates.');
+      return null;
     }
-    state.logger.error("Tag name wasn't in result");
-    return null;
+
+    let release;
+    if (channel === 'unstable') {
+      release = releases.find((rel) => rel.prerelease) || releases.find((rel) => !rel.prerelease);
+    } else {
+      release = releases.find((rel) => !rel.prerelease) || releases[0];
+    }
+
+    if (!release || !release.tag_name) {
+      state.logger.error("Tag name wasn't in result");
+      return null;
+    }
+
+    return {
+      version: release.tag_name,
+      changes: release.body || 'No changelog provided.',
+      url: release.html_url,
+      prerelease: Boolean(release.prerelease),
+      channel,
+    };
   },
 
   get defaultExeName() {
@@ -251,12 +284,19 @@ const updater = {
     return name;
   },
 
-  async downloadLatestVersion(defaultExeName, name) {
-    return requests.downloadFile(name, `https://github.com/arespawn/WhatsAppToDiscord/releases/latest/download/${defaultExeName}`);
+  buildDownloadUrl(versionTag, name) {
+    if (!versionTag || versionTag === 'latest') {
+      return `https://github.com/arespawn/WhatsAppToDiscord/releases/latest/download/${name}`;
+    }
+    return `https://github.com/arespawn/WhatsAppToDiscord/releases/download/${versionTag}/${name}`;
   },
 
-  async downloadSignature(defaultExeName) {
-    const signature = await requests.fetchBuffer(`https://github.com/arespawn/WhatsAppToDiscord/releases/latest/download/${defaultExeName}.sig`);
+  async downloadLatestVersion(defaultExeName, name, versionTag) {
+    return requests.downloadFile(name, this.buildDownloadUrl(versionTag, defaultExeName));
+  },
+
+  async downloadSignature(defaultExeName, versionTag) {
+    const signature = await requests.fetchBuffer(this.buildDownloadUrl(versionTag, `${defaultExeName}.sig`));
     if ('error' in signature) {
       state.logger?.error("Couldn't fetch the signature of the update.");
       return false;
@@ -273,7 +313,12 @@ const updater = {
     );
   },
 
-  async update() {
+  async update(targetVersion = state.updateInfo?.version) {
+    if (this.isNode) {
+      state.logger?.info('Self-update is only available for packaged binaries.');
+      return false;
+    }
+
     const currExeName = this.currentExeName;
     const defaultExeName = this.defaultExeName;
     if (!defaultExeName) {
@@ -285,7 +330,7 @@ const updater = {
 
     let downloadStatus;
     try {
-      downloadStatus = await this.downloadLatestVersion(defaultExeName, currExeName);
+      downloadStatus = await this.downloadLatestVersion(defaultExeName, currExeName, targetVersion);
     } catch (err) {
       state.logger?.error({ err }, 'Download failed! Skipping update.');
       await this.revertChanges();
@@ -298,7 +343,7 @@ const updater = {
       return false;
     }
 
-    const signature = await this.downloadSignature(defaultExeName);
+    const signature = await this.downloadSignature(defaultExeName, targetVersion);
     if (signature && !this.validateSignature(signature.result, currExeName)) {
       state.logger?.error("Couldn't verify the signature of the updated binary, reverting back. Please update manually.");
       await this.revertChanges();
@@ -308,48 +353,105 @@ const updater = {
     return true;
   },
 
+  async hasBackup() {
+    const backupPath = `${this.currentExeName}.oldVersion`;
+    try {
+      await fs.promises.access(backupPath, fs.constants.F_OK);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  },
+
+  async rollback() {
+    if (this.isNode) {
+      return { success: false, reason: 'node' };
+    }
+
+    const hasBackup = await this.hasBackup();
+    if (!hasBackup) {
+      return { success: false, reason: 'no-backup' };
+    }
+
+    try {
+      await this.revertChanges();
+      return { success: true };
+    } catch (err) {
+      state.logger?.error({ err }, 'Rollback failed.');
+      return { success: false, reason: 'error' };
+    }
+  },
+
   async run(currVer, { prompt = process.stdin.isTTY } = {}) {
     if (
       process.argv.some((arg) => ['--skip-update', '-su'].includes(arg)) ||
       process.env.WA2DC_SKIP_UPDATE === '1'
     ) {
       state.logger?.info('Skipping update due to configuration.');
+      state.updateInfo = null;
       return;
     }
 
-    if (this.isNode) {
-      state.logger?.info('Running script with node. Skipping auto-update.');
-      return;
-    }
+    const channel = this.channel;
+    const canSelfUpdate = !this.isNode;
 
     this.cleanOldVersion();
-    const newVer = await this.fetchLatestVersion();
+    const newVer = await this.fetchLatestVersion(channel);
     if (newVer === null) {
       state.logger?.error('Something went wrong with auto-update.');
+      state.updateInfo = null;
       return;
     }
 
     if (newVer.version === currVer) {
+      state.updateInfo = null;
       return;
     }
 
-    if (!prompt) {
-      state.updateInfo = { currVer, ...newVer };
+    state.updateInfo = { currVer, ...newVer, canSelfUpdate };
+
+    if (!prompt || !canSelfUpdate) {
       return;
     }
 
-    const answer = (await ui.input(`A new version is available ${currVer} -> ${newVer.version}. Changelog: ${newVer.changes}\nDo you want to update? (Y/N) `)).toLowerCase();
+    const answer = (await ui.input(
+      `A new ${channel} version is available ${currVer} -> ${newVer.version}. Changelog: ${newVer.changes}\nDo you want to update? (Y/N) `
+    )).toLowerCase();
     if (answer !== 'y') {
       state.logger?.info('Skipping update.');
       return;
     }
 
     state.logger?.info('Please wait as the bot downloads the new version.');
-    const exeName = await updater.update();
+    const exeName = await updater.update(newVer.version);
     if (exeName) {
       await ui.input(`Updated WA2DC. Hit enter to exit and run ${this.currentExeName}.`);
       process.exit();
     }
+  },
+
+  formatUpdateMessage(updateInfo) {
+    if (!updateInfo) {
+      return '';
+    }
+
+    const channel = updateInfo.channel || 'stable';
+    const header = `A new ${channel} version is available ${updateInfo.currVer} -> ${updateInfo.version}.`;
+    const lines = [
+      header,
+      `See ${updateInfo.url}`,
+      `Changelog: ${updateInfo.changes}`,
+    ];
+
+    if (updateInfo.canSelfUpdate) {
+      lines.push('Type `update` to apply or `skipUpdate` to ignore.');
+    } else {
+      lines.push(
+        'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart.'
+      );
+    }
+
+    return lines.join('\n');
   },
 
   publicKey: '-----BEGIN PUBLIC KEY-----\n'
@@ -1001,17 +1103,40 @@ const discord = {
   async downloadLargeFile(file) {
     await fs.promises.mkdir(state.settings.DownloadDir, { recursive: true });
     const [absPath, fileName] = await this.findAvailableName(state.settings.DownloadDir, file.name);
-    if (typeof file.attachment?.pipe === 'function') {
-      await pipeline(file.attachment, fs.createWriteStream(absPath));
-    } else if (file.downloadCtx) {
+    const writeFromDownloadCtx = async () => {
       const stream = await downloadContentFromMessage(
         file.downloadCtx.message[file.msgType],
         file.msgType.replace('Message', ''),
         { logger: state.logger, reuploadRequest: state.waClient.updateMediaMessage },
       );
       await pipeline(stream, fs.createWriteStream(absPath));
-    } else {
-      await fs.promises.writeFile(absPath, file.attachment);
+    };
+
+    try {
+      if (typeof file.attachment?.pipe === 'function') {
+        await pipeline(file.attachment, fs.createWriteStream(absPath));
+      } else if (file.downloadCtx) {
+        await writeFromDownloadCtx();
+      } else {
+        await fs.promises.writeFile(absPath, file.attachment);
+      }
+    } catch (err) {
+      // Retry once for transient network errors when we can recreate the stream.
+      const canRetry = !!file.downloadCtx;
+      if (canRetry) {
+        state.logger?.warn({ err, file: file.name }, 'Retrying WhatsApp media download after failure');
+        try {
+          await writeFromDownloadCtx();
+        } catch (retryErr) {
+          state.logger?.error({ err: retryErr, file: file.name }, 'Failed to download WhatsApp media after retry');
+          await fs.promises.rm(absPath, { force: true }).catch(() => {});
+          return '\nWA2DC Attention: Failed to download attachment from WhatsApp. Please check WhatsApp or try again.';
+        }
+      } else {
+        state.logger?.error({ err, file: file.name }, 'Failed to download WhatsApp media');
+        await fs.promises.rm(absPath, { force: true }).catch(() => {});
+        return '\nWA2DC Attention: Failed to download attachment from WhatsApp. Please check WhatsApp or try again.';
+      }
     }
     await this.pruneDownloadsDir(absPath);
     ensureDownloadServer();
@@ -1399,7 +1524,11 @@ const whatsapp = {
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;
     for (const contact of contacts) {
-      const name = contact?.name || contact?.subject;
+      const name = contact?.name
+        || contact?.subject
+        || contact?.verifiedName
+        || contact?.notify
+        || contact?.pushName;
       if (!name) continue;
       const preferredId = this.formatJid(contact?.id);
       let alternateId = null;

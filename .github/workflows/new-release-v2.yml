@@ -2,6 +2,14 @@ name: Build and Release Binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel (stable or unstable)"
+        required: true
+        default: stable
+      tag:
+        description: "Override the release tag (defaults to package.json version)"
+        required: false
 
 jobs:
   release:
@@ -52,21 +60,51 @@ jobs:
           openssl dgst -sha256 -sign private.pem -out build/WA2DC.exe.sig          build/WA2DC.exe
           rm private.pem
 
-      - name: Derive tag from package.json
+      - name: Derive tag
         id: tag
         run: |
-          VERSION=$(jq -r '.version' package.json)
-          if [[ -z "$VERSION" ]]; then
-            echo "Version not found in package.json" >&2
-            exit 1
+          if [ -n "${{ inputs.tag }}" ]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION=$(jq -r '.version' package.json)
+            if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+              echo "Version not found in package.json" >&2
+              exit 1
+            fi
+            VERSION="v$VERSION"
           fi
-          echo "value=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release flags
+        id: channel
+        run: |
+          CHANNEL=$(echo "${{ inputs.channel }}" | tr '[:upper:]' '[:lower:]')
+          if [ "$CHANNEL" != "unstable" ]; then
+            CHANNEL="stable"
+          fi
+
+          if [ "$CHANNEL" = "unstable" ]; then
+            PRERELEASE="true"
+            LATEST="false"
+          else
+            PRERELEASE="false"
+            LATEST="true"
+          fi
+
+          {
+            echo "channel=$CHANNEL"
+            echo "prerelease=$PRERELEASE"
+            echo "latest=$LATEST"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create / update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.tag.outputs.value }}"
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          PRERELEASE="${{ steps.channel.outputs.prerelease }}"
+          LATEST="${{ steps.channel.outputs.latest }}"
 
           ASSETS=(
             build/WA2DC-Linux
@@ -82,13 +120,16 @@ jobs:
             build/WA2DC.exe.sig
           )
 
-          # gh release create will automatically create the tag if it doesn't exist
+          PRERELEASE_FLAG="--prerelease=$PRERELEASE"
+          LATEST_FLAG="--latest=$LATEST"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Updating existing release $TAG…"
+            echo "Updating existing release $TAG on channel $CHANNEL…"
+            gh release edit "$TAG" "$PRERELEASE_FLAG" "$LATEST_FLAG" --verify-tag --draft=false
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
-            echo "Creating new release $TAG…"
-            gh release create "$TAG" --target "${{ github.sha }}" --generate-notes --latest "${ASSETS[@]}"
+            echo "Creating new $CHANNEL release $TAG…"
+            gh release create "$TAG" --target "${{ github.sha }}" --generate-notes "$PRERELEASE_FLAG" "$LATEST_FLAG" "${ASSETS[@]}"
           fi
 
           echo "✅ Release ready:"
