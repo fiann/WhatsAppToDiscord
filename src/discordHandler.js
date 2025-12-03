@@ -15,6 +15,7 @@ const client = createDiscordClient({
     Intents.FLAGS.GUILDS,
     Intents.FLAGS.GUILD_MESSAGES,
     Intents.FLAGS.GUILD_MESSAGE_REACTIONS,
+    Intents.FLAGS.GUILD_MESSAGE_TYPING,
     Intents.FLAGS.MESSAGE_CONTENT,
   ],
 });
@@ -201,6 +202,11 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
     } else if (file !== -1) {
       files.push(file);
     }
+  }
+
+  if (msgContent) {
+    const normalization = utils.discord.ensureExplicitUrlScheme(msgContent);
+    msgContent = normalization.text;
   }
 
   if (message.isEdit) {

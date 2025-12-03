@@ -43,7 +43,8 @@ const patchSendMessageForLinkPreviews = (client) => {
         if (!normalizedOptions.logger) {
             normalizedOptions.logger = state.logger;
         }
-        if (!normalizedOptions.getUrlInfo) {
+        const needsGeneratedPreview = !content?.linkPreview;
+        if (needsGeneratedPreview && !normalizedOptions.getUrlInfo) {
             normalizedOptions.getUrlInfo = defaultGetUrlInfo;
         }
         return baseSendMessage(jid, content, normalizedOptions);
@@ -350,12 +351,7 @@ const connectToWhatsApp = async (retry = 1) => {
             return;
         }
         
-        const options = {
-            getUrlInfo: (urlText) => utils.whatsapp.generateLinkPreview(urlText, {
-                uploadImage: typeof client.waUploadToServer === 'function' ? client.waUploadToServer : undefined,
-                logger: state.logger,
-            }),
-        };
+        const options = {};
 
         if (message.reference) {
             options.quoted = await utils.whatsapp.createQuoteMessage(message);
@@ -449,6 +445,13 @@ const connectToWhatsApp = async (retry = 1) => {
         const content = { text: finalText };
         if (mentionJids.length) {
             content.mentions = mentionJids;
+        }
+        const preview = await utils.whatsapp.generateLinkPreview(finalText, {
+            uploadImage: typeof client.waUploadToServer === 'function' ? client.waUploadToServer : undefined,
+            logger: state.logger,
+        });
+        if (preview) {
+            content.linkPreview = preview;
         }
 
         try {
