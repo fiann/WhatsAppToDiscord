@@ -34,9 +34,12 @@ async function runWorker() {
   }
 }
 
-if (!cluster.isPrimary) {
-  await runWorker();
-} else {
+async function main() {
+  if (!cluster.isPrimary) {
+    await runWorker();
+    return;
+  }
+
   cluster.setupPrimary({ execArgv: ['--no-deprecation'] });
 
   const logger = pino({}, pino.multistream([
@@ -149,3 +152,8 @@ if (!cluster.isPrimary) {
 
   start();
 }
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
