@@ -32,6 +32,7 @@ const state = {
     UpdateChannel: 'stable',
     KeepOldBinary: true,
     UpdatePromptMessage: null,
+    RollbackPromptMessage: null,
   },
   dcClient: null,
   waClient: null,

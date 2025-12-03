@@ -157,10 +157,12 @@ if (!globalThis.crypto) {
     await utils.updater.run(version, { prompt: false });
     state.logger.info('Update checked.');
     await utils.discord.syncUpdatePrompt();
+    await utils.discord.syncRollbackPrompt();
 
     setInterval(async () => {
       await utils.updater.run(version, { prompt: false });
       await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
     }, 2 * 24 * 60 * 60 * 1000);
   } else {
     state.logger.info('Skipping update checks for smoke test.');

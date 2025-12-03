@@ -11,10 +11,7 @@ import { pathToFileURL } from 'url';
 import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
-import './patches/registerFetchPolyfill.js';
 import * as linkPreview from 'link-preview-js';
-import './patches/registerJimpLoadFontStub.js';
-import 'jimp';
 
 import state from './state.js';
 import storage from './storage.js';
@@ -46,6 +43,7 @@ const UPDATE_BUTTON_IDS = {
   APPLY: 'wa2dc:update',
   SKIP: 'wa2dc:skip-update',
 };
+const ROLLBACK_BUTTON_ID = 'wa2dc:rollback';
 const getLinkPreviewFn = typeof linkPreview === 'function'
   ? linkPreview
   : linkPreview?.getLinkPreview
@@ -802,6 +800,7 @@ const sqliteToJson = {
 
 const discord = {
   updateButtonIds: UPDATE_BUTTON_IDS,
+  rollbackButtonId: ROLLBACK_BUTTON_ID,
   channelIdToJid(channelId) {
     return Object.keys(state.chats).find((key) => state.chats[key].channelId === channelId);
   },
@@ -1483,6 +1482,93 @@ const discord = {
       await this.ensureUpdatePrompt(state.updateInfo);
     } else {
       await this.clearUpdatePrompt();
+    }
+  },
+  async _fetchRollbackPromptMessage() {
+    const ref = state.settings.RollbackPromptMessage;
+    if (!ref?.messageId) {
+      return null;
+    }
+    const channelId = ref.channelId || state.settings.ControlChannelID;
+    try {
+      const channel = await this.getChannel(channelId);
+      if (!channel) {
+        state.settings.RollbackPromptMessage = null;
+        return null;
+      }
+      const message = await channel.messages.fetch(ref.messageId);
+      return message;
+    } catch (err) {
+      state.logger?.debug?.({ err }, 'Failed to fetch stored rollback prompt message');
+      state.settings.RollbackPromptMessage = null;
+      return null;
+    }
+  },
+  async ensureRollbackPrompt() {
+    if (updater.isNode) {
+      await this.clearRollbackPrompt();
+      return;
+    }
+    const hasBackup = await updater.hasBackup();
+    if (!hasBackup) {
+      await this.clearRollbackPrompt();
+      return;
+    }
+    const content = 'A backup of the previous version is available. Use the button below to roll back if you encounter issues.';
+    const components = [
+      new MessageActionRow().addComponents(
+        new MessageButton()
+          .setCustomId(ROLLBACK_BUTTON_ID)
+          .setLabel('Roll back')
+          .setStyle('DANGER'),
+      ),
+    ];
+    let message = await this._fetchRollbackPromptMessage();
+    if (message) {
+      await message.edit({ content, components });
+      return;
+    }
+    const channel = await this.getControlChannel();
+    if (!channel) {
+      return;
+    }
+    message = await channel.send({ content, components });
+    state.settings.RollbackPromptMessage = {
+      channelId: channel.id,
+      messageId: message.id,
+    };
+    try {
+      await storage.save();
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to persist rollback prompt metadata');
+    }
+  },
+  async clearRollbackPrompt() {
+    const ref = state.settings.RollbackPromptMessage;
+    const hadStoredMessage = Boolean(ref);
+    if (ref?.messageId) {
+      const message = await this._fetchRollbackPromptMessage();
+      await message?.delete().catch(() => {});
+    }
+    state.settings.RollbackPromptMessage = null;
+    if (hadStoredMessage) {
+      try {
+        await storage.save();
+      } catch (err) {
+        state.logger?.warn({ err }, 'Failed to persist cleared rollback prompt metadata');
+      }
+    }
+  },
+  async syncRollbackPrompt() {
+    if (updater.isNode) {
+      await this.clearRollbackPrompt();
+      return;
+    }
+    const hasBackup = await updater.hasBackup();
+    if (hasBackup) {
+      await this.ensureRollbackPrompt();
+    } else {
+      await this.clearRollbackPrompt();
     }
   },
   async findAvailableName(dir, fileName) {

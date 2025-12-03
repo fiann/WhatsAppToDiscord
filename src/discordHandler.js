@@ -22,9 +22,9 @@ let controlChannel;
 let slashRegisterWarned = false;
 const pendingAlbums = {};
 const deliveredMessages = new Set();
-const FORCE_TOKENS = new Set(['--force', '-f']);
 const BOT_PERMISSIONS = 536879120;
 const UPDATE_BUTTON_IDS = utils.discord.updateButtonIds;
+const ROLLBACK_BUTTON_ID = utils.discord.rollbackButtonId;
 
 class CommandResponder {
   constructor({ interaction, channel }) {
@@ -75,28 +75,21 @@ class CommandResponder {
 }
 
 class CommandContext {
-  constructor({ interaction, message, rawArgs = [], lowerArgs = [], responder }) {
+  constructor({ interaction, responder }) {
     this.interaction = interaction;
-    this.message = message;
-    this.rawArgs = rawArgs;
-    this.lowerArgs = lowerArgs;
     this.responder = responder;
   }
 
   get channel() {
-    return this.interaction?.channel ?? this.message?.channel ?? null;
+    return this.interaction?.channel ?? null;
   }
 
   get createdTimestamp() {
-    return this.interaction?.createdTimestamp ?? this.message?.createdTimestamp ?? Date.now();
+    return this.interaction?.createdTimestamp ?? Date.now();
   }
 
   get isControlChannel() {
     return this.channel?.id === state.settings.ControlChannelID;
-  }
-
-  get argString() {
-    return this.rawArgs.join(' ');
   }
 
   async reply(payload) {
@@ -131,13 +124,6 @@ class CommandContext {
     return this.interaction?.options?.getChannel(name);
   }
 
-  getMentionedChannel(index = 0) {
-    if (!this.message?.mentions?.channels?.size) {
-      return null;
-    }
-    const channels = [...this.message.mentions.channels.values()];
-    return channels[index] ?? null;
-  }
 }
 
 const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) => {
@@ -520,7 +506,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const number = ctx.getStringOption('number') ?? ctx.rawArgs[0];
+      const number = ctx.getStringOption('number');
       if (!number) {
         await ctx.reply('Please enter your number. Usage: `pairWithCode <number>`. Don\'t use "+" or any other special characters.');
         return;
@@ -541,7 +527,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const contact = ctx.getStringOption('contact') ?? ctx.argString;
+      const contact = ctx.getStringOption('contact');
       if (!contact) {
         await ctx.reply('Please enter a phone number or name. Usage: `start <number with country code or name>`.');
         return;
@@ -593,22 +579,9 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const force = ctx.getBooleanOption('force') ?? ctx.lowerArgs?.some((token) => FORCE_TOKENS.has(token));
-      const slashChannel = ctx.getChannelOption('channel');
-      const messageChannel = ctx.message?.mentions?.channels?.first();
-      const channel = slashChannel ?? messageChannel;
-      const argsWithoutFlags = (ctx.lowerArgs || []).filter((token) => !FORCE_TOKENS.has(token));
-      const mentionTokenLower = channel ? `<#${channel.id}>`.toLowerCase() : null;
-
-      let contactQuery = ctx.getStringOption('contact');
-      if (!contactQuery && ctx.rawArgs?.length) {
-        const mentionIndex = mentionTokenLower != null ? argsWithoutFlags.indexOf(mentionTokenLower) : -1;
-        if (mentionIndex === -1) {
-          contactQuery = ctx.rawArgs.filter((token, idx) => !FORCE_TOKENS.has(ctx.lowerArgs[idx]) && token !== mentionTokenLower).join(' ');
-        } else {
-          contactQuery = ctx.rawArgs.slice(0, mentionIndex).join(' ');
-        }
-      }
+      const force = Boolean(ctx.getBooleanOption('force'));
+      const channel = ctx.getChannelOption('channel');
+      const contactQuery = ctx.getStringOption('contact');
 
       if (!channel || !contactQuery) {
         await ctx.reply('Please provide a contact and a channel. Usage: `link <number with country code or name> #<channel>`');
@@ -643,7 +616,7 @@ const commandHandlers = {
       let displacedRun;
       if (existingJid && existingJid !== normalizedJid) {
         if (!force) {
-          await ctx.reply('That channel is already linked to another WhatsApp conversation. Add `--force` (or use the `move` command) to override it.');
+          await ctx.reply('That channel is already linked to another WhatsApp conversation. Enable the force option (or use the move command) to override it.');
           return;
         }
         displacedChat = state.chats[existingJid];
@@ -743,27 +716,12 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const slashFrom = ctx.getChannelOption('from');
-      const slashTo = ctx.getChannelOption('to');
-      const mentionMatches = ctx.message?.content?.match(/<#(\d+)>/g) || [];
-      const orderedIds = [];
-      for (const token of mentionMatches) {
-        const id = token.replace(/[^\d]/g, '');
-        if (id && !orderedIds.includes(id)) {
-          orderedIds.push(id);
-        }
-        if (orderedIds.length === 2) {
-          break;
-        }
-      }
-      const messageFrom = orderedIds[0] ? ctx.message?.mentions?.channels?.get(orderedIds[0]) : null;
-      const messageTo = orderedIds[1] ? ctx.message?.mentions?.channels?.get(orderedIds[1]) : null;
-      const source = slashFrom ?? messageFrom;
-      const target = slashTo ?? messageTo;
-      const force = ctx.getBooleanOption('force') ?? (ctx.lowerArgs?.some((token) => FORCE_TOKENS.has(token)));
+      const source = ctx.getChannelOption('from');
+      const target = ctx.getChannelOption('to');
+      const force = Boolean(ctx.getBooleanOption('force'));
 
       if (!source || !target) {
-        await ctx.reply('Please mention the current channel and the new channel. Usage: `move #old-channel #new-channel [--force]`');
+        await ctx.reply('Please mention the current channel and the new channel. Usage: `move #old-channel #new-channel` (enable the force option to override existing links)');
         return;
       }
 
@@ -800,7 +758,7 @@ const commandHandlers = {
       let displacedRun;
       if (existingTargetJid && existingTargetJid !== normalizedJid) {
         if (!force) {
-          await ctx.reply('That destination channel is already linked to another conversation. Add `--force` to override it.');
+          await ctx.reply('That destination channel is already linked to another conversation. Enable the force option to override it.');
           return;
         }
         displacedChat = state.chats[existingTargetJid];
@@ -898,7 +856,7 @@ const commandHandlers = {
     ],
     async execute(ctx) {
       let contacts = utils.whatsapp.contacts();
-      const query = (ctx.getStringOption('query') ?? ctx.argString)?.toLowerCase();
+      const query = ctx.getStringOption('query')?.toLowerCase();
       if (query) { contacts = contacts.filter((name) => name.toLowerCase().includes(query)); }
       contacts = contacts.sort((a, b) => a.localeCompare(b)).join('\n');
       const message = utils.discord.partitionText(
@@ -923,7 +881,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const channel = ctx.getChannelOption('channel') ?? ctx.getMentionedChannel();
+      const channel = ctx.getChannelOption('channel');
       if (!channel) {
         await ctx.reply('Please enter a valid channel name. Usage: `addToWhitelist #<target channel>`.');
         return;
@@ -953,7 +911,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const channel = ctx.getChannelOption('channel') ?? ctx.getMentionedChannel();
+      const channel = ctx.getChannelOption('channel');
       if (!channel) {
         await ctx.reply('Please enter a valid channel name. Usage: `removeFromWhitelist #<target channel>`.');
         return;
@@ -991,7 +949,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const prefix = ctx.getStringOption('prefix') ?? ctx.argString;
+      const prefix = ctx.getStringOption('prefix');
       if (prefix) {
         state.settings.DiscordPrefixText = prefix;
         await ctx.reply(`Discord prefix is set to ${prefix}!`);
@@ -1115,7 +1073,7 @@ const commandHandlers = {
       });
       await state.waClient.resyncAppState(['critical_unblock_low']);
       for (const [jid, attributes] of Object.entries(await state.waClient.groupFetchAllParticipating())) { state.waClient.contacts[jid] = attributes.subject; }
-      const shouldRename = ctx.getBooleanOption('rename') ?? (ctx.lowerArgs || []).includes('rename');
+      const shouldRename = Boolean(ctx.getBooleanOption('rename'));
       if (shouldRename) {
         try {
           await utils.discord.renameChannels();
@@ -1157,11 +1115,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const message = ctx.getStringOption('message') ?? ctx.argString;
-      if (!message) {
-        await ctx.reply('Please provide a template. Usage: `setDownloadMessage <your message here>`');
-        return;
-      }
+      const message = ctx.getStringOption('message');
       state.settings.LocalDownloadMessage = message;
       await ctx.reply(`Set download message format to "${state.settings.LocalDownloadMessage}"`);
     },
@@ -1183,11 +1137,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const dir = ctx.getStringOption('path') ?? ctx.argString;
-      if (!dir) {
-        await ctx.reply('Please provide a path. Usage: `setDownloadDir <desired save path>`');
-        return;
-      }
+      const dir = ctx.getStringOption('path');
       state.settings.DownloadDir = dir;
       await ctx.reply(`Set download path to "${state.settings.DownloadDir}"`);
     },
@@ -1203,7 +1153,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const gb = ctx.getNumberOption('size') ?? parseFloat(ctx.rawArgs?.[0]);
+      const gb = ctx.getNumberOption('size');
       if (!Number.isNaN(gb) && gb >= 0) {
         state.settings.DownloadDirLimitGB = gb;
         await ctx.reply(`Set download directory size limit to ${gb} GB.`);
@@ -1223,7 +1173,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const size = ctx.getIntegerOption('bytes') ?? parseInt(ctx.rawArgs?.[0], 10);
+      const size = ctx.getIntegerOption('bytes');
       if (!Number.isNaN(size) && size > 0) {
         state.settings.DiscordFileSizeLimit = size;
         await ctx.reply(`Set Discord file size limit to ${size} bytes.`);
@@ -1259,7 +1209,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const port = ctx.getIntegerOption('port') ?? parseInt(ctx.rawArgs?.[0], 10);
+      const port = ctx.getIntegerOption('port');
       if (!Number.isNaN(port) && port > 0 && port <= 65535) {
         state.settings.LocalDownloadServerPort = port;
         utils.stopDownloadServer();
@@ -1281,15 +1231,11 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const host = ctx.getStringOption('host') ?? ctx.rawArgs?.[0];
-      if (host) {
-        state.settings.LocalDownloadServerHost = host;
-        utils.stopDownloadServer();
-        utils.ensureDownloadServer();
-        await ctx.reply(`Set local download server host to ${host}.`);
-      } else {
-        await ctx.reply('Please provide a host name or IP.');
-      }
+      const host = ctx.getStringOption('host');
+      state.settings.LocalDownloadServerHost = host;
+      utils.stopDownloadServer();
+      utils.ensureDownloadServer();
+      await ctx.reply(`Set local download server host to ${host}.`);
     },
   },
   enablehttpsdownloadserver: {
@@ -1327,12 +1273,8 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const key = ctx.getStringOption('key_path') ?? ctx.rawArgs?.[0];
-      const cert = ctx.getStringOption('cert_path') ?? ctx.rawArgs?.[1];
-      if (!key || !cert) {
-        await ctx.reply('Usage: `setHttpsCert <key> <cert>`');
-        return;
-      }
+      const key = ctx.getStringOption('key_path');
+      const cert = ctx.getStringOption('cert_path');
       [state.settings.HttpsKeyPath, state.settings.HttpsCertPath] = [key, cert];
       utils.stopDownloadServer();
       utils.ensureDownloadServer();
@@ -1378,11 +1320,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const seconds = ctx.getIntegerOption('seconds') ?? parseInt(ctx.rawArgs?.[0], 10);
-      if (Number.isNaN(seconds)) {
-        await ctx.reply("Usage: autoSaveInterval <seconds>\nExample: autoSaveInterval 60");
-        return;
-      }
+      const seconds = ctx.getIntegerOption('seconds');
       state.settings.autoSaveInterval = seconds;
       await ctx.reply(`Changed auto save interval to ${seconds}.`);
     },
@@ -1398,11 +1336,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const size = ctx.getIntegerOption('size') ?? parseInt(ctx.rawArgs?.[0], 10);
-      if (Number.isNaN(size)) {
-        await ctx.reply("Usage: lastMessageStorage <size>\nExample: lastMessageStorage 1000");
-        return;
-      }
+      const size = ctx.getIntegerOption('size');
       state.settings.lastMessageStorage = size;
       await ctx.reply(`Changed last message storage size to ${size}.`);
     },
@@ -1423,11 +1357,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const direction = ctx.getStringOption('direction') ?? ctx.rawArgs?.[0];
-      if (!direction || !['discord', 'whatsapp', 'disabled'].includes(direction)) {
-        await ctx.reply("Usage: oneWay <discord|whatsapp|disabled>\nExample: oneWay whatsapp");
-        return;
-      }
+      const direction = ctx.getStringOption('direction');
 
       if (direction === 'disabled') {
         state.settings.oneWay = 0b11;
@@ -1452,16 +1382,8 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const enabledOption = ctx.getBooleanOption('enabled');
-      const raw = ctx.rawArgs?.[0]?.toLowerCase?.();
-      const rawValue = raw === 'yes' ? true : raw === 'no' ? false : null;
-      const enabled = enabledOption ?? rawValue;
-      if (enabled == null) {
-        await ctx.reply("Usage: redirectWebhooks <yes|no>\nExample: redirectWebhooks yes");
-        return;
-      }
-
-      state.settings.redirectWebhooks = Boolean(enabled);
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.redirectWebhooks = enabled;
       await ctx.reply(`Redirecting webhooks is set to ${state.settings.redirectWebhooks}.`);
     },
   },
@@ -1480,16 +1402,13 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const channel = (ctx.getStringOption('channel') ?? ctx.rawArgs?.[0])?.toLowerCase();
-      if (!['stable', 'unstable'].includes(channel)) {
-        await ctx.reply("Usage: updateChannel <stable|unstable>\nExample: updateChannel unstable");
-        return;
-      }
+      const channel = ctx.getStringOption('channel');
 
       state.settings.UpdateChannel = channel;
       await ctx.reply(`Update channel set to ${channel}. Checking for new releases...`);
       await utils.updater.run(state.version, { prompt: false });
       await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
         await ctx.replyPartitioned(message);
@@ -1524,6 +1443,7 @@ const commandHandlers = {
       await ctx.reply('Update downloaded. Restarting...');
       state.updateInfo = null;
       await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       await fs.promises.writeFile('restart.flag', '');
       process.exit();
     },
@@ -1534,6 +1454,7 @@ const commandHandlers = {
       await ctx.defer();
       await utils.updater.run(state.version, { prompt: false });
       await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
         await ctx.replyPartitioned(message);
@@ -1547,6 +1468,7 @@ const commandHandlers = {
     async execute(ctx) {
       state.updateInfo = null;
       await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       await ctx.reply('Update skipped.');
     },
   },
@@ -1557,6 +1479,7 @@ const commandHandlers = {
       const result = await utils.updater.rollback();
       if (result.success) {
         await ctx.reply('Rolled back to the previous packaged binary. Restarting...');
+        await utils.discord.syncRollbackPrompt();
         await fs.promises.writeFile('restart.flag', '');
         process.exit();
         return;
@@ -1580,11 +1503,7 @@ const commandHandlers = {
   unknown: {
     register: false,
     async execute(ctx) {
-      if (ctx.message) {
-        await ctx.reply(`Unknown command: \`${ctx.message.content}\`\nType \`/help\` to see available commands`);
-      } else {
-        await ctx.reply('Unknown command.');
-      }
+      await ctx.reply('Unknown command.');
     },
   },
 };
@@ -1645,6 +1564,10 @@ client.on('interactionCreate', async (interaction) => {
     }
     if (interaction.customId === UPDATE_BUTTON_IDS.SKIP) {
       await handleInteractionCommand(interaction, 'skipupdate');
+      return;
+    }
+    if (interaction.customId === ROLLBACK_BUTTON_ID) {
+      await handleInteractionCommand(interaction, 'rollback');
       return;
     }
     return;
