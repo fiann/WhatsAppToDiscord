@@ -35,6 +35,9 @@ const MIME_BY_EXTENSION = {
 const LINK_PREVIEW_FETCH_TIMEOUT_MS = 3000;
 const LINK_PREVIEW_MAX_REDIRECTS = 5;
 const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
+const EXPLICIT_URL_REGEX = /<?https?:\/\/[^\s>]+>?/i;
+const BARE_URL_REGEX = /(?:^|[\s<])((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=+#]*)?)/i;
+const TRAILING_PUNCTUATION_REGEX = /[)\],.;!?]+$/;
 
 const sanitizeFileName = (name = '', fallback = 'file') => {
   const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
@@ -74,8 +77,26 @@ const dedupeAttachments = (attachments = []) => {
   });
 };
 
+const stripUrlDelimiters = (value = '') => value.replace(/^<+|>+$/g, '');
+const stripTrailingPunctuation = (value = '') => value.replace(TRAILING_PUNCTUATION_REGEX, '');
+
+const extractUrlCandidate = (text = '') => {
+  if (!text) {
+    return null;
+  }
+  const explicitMatch = text.match(EXPLICIT_URL_REGEX);
+  if (explicitMatch) {
+    return stripTrailingPunctuation(stripUrlDelimiters(explicitMatch[0]));
+  }
+  const bareMatch = text.match(BARE_URL_REGEX);
+  if (bareMatch) {
+    return stripTrailingPunctuation(bareMatch[1] || '');
+  }
+  return null;
+};
+
 const normalizePreviewUrl = (value = '') => {
-  const trimmed = value.trim();
+  const trimmed = stripTrailingPunctuation(stripUrlDelimiters(value).trim());
   if (!trimmed) {
     return null;
   }
@@ -139,7 +160,11 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
 };
 
 const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
-  const normalizedUrl = normalizePreviewUrl(text);
+  const matchedText = extractUrlCandidate(text);
+  if (!matchedText) {
+    return undefined;
+  }
+  const normalizedUrl = normalizePreviewUrl(matchedText);
   if (!normalizedUrl) {
     return undefined;
   }
@@ -164,7 +189,7 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
 
   const urlInfo = {
     'canonical-url': preview.url || normalizedUrl,
-    'matched-text': text,
+    'matched-text': matchedText,
   };
 
   if (preview.title) {
@@ -764,6 +789,10 @@ const discord = {
       // eslint-disable-next-line no-await-in-loop
       await channel.send(part);
     }
+  },
+  stripCustomEmojiCodes(text = '') {
+    if (!text) return '';
+    return text.replace(CUSTOM_EMOJI_REGEX, ' ').replace(/  +/g, ' ');
   },
   extractCustomEmojiData(message) {
     const content = message?.content ?? '';

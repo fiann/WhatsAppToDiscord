@@ -340,13 +340,19 @@ const connectToWhatsApp = async (retry = 1) => {
             text = text.replace(/^@\S+\s*/, '');
         }
 
-        if (!text.trim() && hasOnlyCustomEmoji) {
+        text = utils.discord.stripCustomEmojiCodes(text);
+        let trimmedText = text.trim();
+
+        if (!trimmedText && hasOnlyCustomEmoji) {
             text = emojiData.matches.map((entry) => `:${entry.name}:`).join(' ');
+            trimmedText = text.trim();
+        } else {
+            text = trimmedText;
         }
 
         if (state.settings.DiscordPrefix) {
             const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
-            text = `*${prefix}*\n${text}`;
+            text = trimmedText ? `*${prefix}*\n${trimmedText}` : `*${prefix}*`;
         }
 
         const media = utils.discord.collectMessageMedia(message, {
