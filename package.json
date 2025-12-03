@@ -42,6 +42,7 @@
     "assets": [
       "node_modules/jimp/fonts/**/*",
       "node_modules/@jimp/plugin-print/dist/commonjs/load-font.js",
+      "node_modules/@jimp/plugin-print/dist/**/*",
       "node_modules/@jimp/plugin-print/fonts/**/*"
     ]
   },
