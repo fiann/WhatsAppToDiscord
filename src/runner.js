@@ -3,10 +3,7 @@ import path from 'path';
 import pino from 'pino';
 import pretty from 'pino-pretty';
 import fs from 'fs';
-import { fileURLToPath, pathToFileURL } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { pathToFileURL } from 'url';
 
 const DEFAULT_RESTART_DELAY = 10000; // ms
 const parsedRestartDelay = Number(process.env.WA2DC_RESTART_DELAY);
@@ -71,7 +68,7 @@ if (!cluster.isPrimary) {
   let currentWorker = null;
   let shuttingDown = false;
 
-  function clearRestartFlag() {
+  const clearRestartFlag = () => {
     if (!fs.existsSync(RESTART_FLAG_PATH)) {
       return false;
     }
@@ -83,9 +80,9 @@ if (!cluster.isPrimary) {
       }
     }
     return true;
-  }
+  };
 
-  function handleExit(code, signal) {
+  const handleExit = (code, signal) => {
     if (shuttingDown) {
       process.exit(code ?? 0);
     }
@@ -121,9 +118,9 @@ if (!cluster.isPrimary) {
       `Bot exited${reason}. Restarting in ${delay / 1000}s (attempt ${restartAttempts}/${MAX_RESTARTS})...`,
     );
     setTimeout(start, delay);
-  }
+  };
 
-  function start() {
+  const start = () => {
     workerStartTime = Date.now();
     currentWorker = cluster.fork();
 
@@ -139,7 +136,7 @@ if (!cluster.isPrimary) {
     currentWorker.once('error', (err) => {
       logger.error({ err }, 'Worker process error');
     });
-  }
+  };
 
   ['SIGINT', 'SIGTERM'].forEach((sig) => {
     process.on(sig, () => {
