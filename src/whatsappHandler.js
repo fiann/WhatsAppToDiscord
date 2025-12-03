@@ -74,8 +74,6 @@ const ensureSignalStoreSupport = async (keyStore) => {
     }
 };
 
-const whatsappTypingStates = new Map();
-
 const migrateLegacyChats = async (client) => {
     const store = client.signalRepository?.lidMapping;
     if (!store) return;
@@ -305,30 +303,6 @@ const connectToWhatsApp = async (retry = 1) => {
         }
     });
 
-    client.ev.on('presence.update', async ({ id, presences }) => {
-        if (!utils.whatsapp.inWhitelist({ chatId: id })) return;
-        const entries = Object.values(presences || {});
-        const chatJid = utils.whatsapp.formatJid(id);
-        if (!chatJid) return;
-        const isTyping = entries.some((presence) => {
-            const status = presence?.lastKnownPresence || presence?.presence;
-            return ['composing', 'recording'].includes(status);
-        });
-        const prevState = whatsappTypingStates.get(chatJid) ?? false;
-        if (prevState === isTyping) {
-            return;
-        }
-        if (isTyping) {
-            whatsappTypingStates.set(chatJid, true);
-        } else {
-            whatsappTypingStates.delete(chatJid);
-        }
-        state.dcClient.emit('whatsappTyping', {
-            jid: chatJid,
-            isTyping,
-        });
-    });
-
     client.ws.on(`CB:notification,type:status,set`, async (update) => {
         if (!utils.whatsapp.inWhitelist({ chatId: update.attrs.from })) return;
 
@@ -446,12 +420,18 @@ const connectToWhatsApp = async (retry = 1) => {
         if (mentionJids.length) {
             content.mentions = mentionJids;
         }
-        const preview = await utils.whatsapp.generateLinkPreview(finalText, {
-            uploadImage: typeof client.waUploadToServer === 'function' ? client.waUploadToServer : undefined,
-            logger: state.logger,
-        });
+        let preview = null;
+        try {
+            preview = await utils.whatsapp.generateLinkPreview(finalText, {
+                uploadImage: typeof client.waUploadToServer === 'function' ? client.waUploadToServer : undefined,
+                logger: state.logger,
+            });
+        } catch (err) {
+            state.logger?.warn({ err }, 'Failed to generate Discord link preview payload');
+        }
         if (preview) {
             content.linkPreview = preview;
+            options.getUrlInfo = () => preview;
         }
 
         try {
