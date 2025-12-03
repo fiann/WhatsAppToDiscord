@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Discord and WhatsApp",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/runner.js",
   "scripts": {
     "start": "node src/runner.js",
     "docs": "docsify serve docs",
