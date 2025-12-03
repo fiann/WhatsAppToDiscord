@@ -61,6 +61,8 @@ const guessExtensionFromUrl = (url = '') => {
 
 const extensionToMime = (ext = '') => MIME_BY_EXTENSION[ext] || 'application/octet-stream';
 
+const isSupportedGifUrl = (url = '') => GIF_URL_EXTENSION_REGEX.test(url);
+
 const pickEmbedMediaUrl = (embed = {}) => {
   const candidates = [
     embed.video?.url,
@@ -69,11 +71,13 @@ const pickEmbedMediaUrl = (embed = {}) => {
     embed.image?.proxyURL,
     embed.thumbnail?.url,
     embed.thumbnail?.proxyURL,
-  ];
-  return candidates.find((candidate) => typeof candidate === 'string' && candidate.startsWith('http')) || null;
+  ].filter((candidate) => typeof candidate === 'string' && candidate.startsWith('http'));
+  if (!candidates.length) {
+    return null;
+  }
+  const supported = candidates.find((candidate) => isSupportedGifUrl(candidate));
+  return supported || candidates[0] || null;
 };
-
-const isSupportedGifUrl = (url = '') => GIF_URL_EXTENSION_REGEX.test(url);
 
 const dedupeAttachments = (attachments = []) => {
   const seen = new Set();
@@ -871,11 +875,9 @@ const discord = {
     if (!id) return null;
     const format = sticker?.format;
     let extension = 'png';
-    let baseUrl = `https://cdn.discordapp.com/stickers/${id}`;
+    let baseUrl = `https://media.discordapp.net/stickers/${id}`;
     if (format === StickerFormatTypes.GIF) {
       extension = 'gif';
-    } else if (format === StickerFormatTypes.LOTTIE) {
-      baseUrl = `https://media.discordapp.net/stickers/${id}`;
     }
     const url = `${baseUrl}.${extension}${extension === 'png' ? '?size=320' : ''}`;
     return {
