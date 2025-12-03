@@ -5,6 +5,8 @@ import discordJs from 'discord.js';
 
 import state from './state.js';
 
+const isSmokeTest = process.env.WA2DC_SMOKE_TEST === '1';
+
 const { Client, Intents } = discordJs;
 
 const bidirectionalMap = (capacity, data = {}) => {
@@ -38,6 +40,18 @@ const storage = {
 
   _settingsName: 'settings',
   async parseSettings() {
+    if (isSmokeTest) {
+      const smokeDefaults = {
+        Token: 'SMOKE_TOKEN',
+        GuildID: 'SMOKE_GUILD',
+        Categories: [],
+        ControlChannelID: 'SMOKE_CONTROL',
+        Publish: false,
+        LocalDownloadServer: false,
+      };
+      return Object.assign(state.settings, smokeDefaults);
+    }
+
     const result = await this.get(this._settingsName);
     if (result == null) {
       return setup.firstRun();

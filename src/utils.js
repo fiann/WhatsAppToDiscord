@@ -619,6 +619,8 @@ const discord = {
 
     let nthCategory = Math.floor((nthChannel + 1) / 50);
 
+    // Keep searching until a valid or new category is available.
+    // eslint-disable-next-line no-constant-condition
     while (true) {
       if (state.settings.Categories[nthCategory] == null) {
         const categoryName = `whatsapp ${nthCategory + 1}`;

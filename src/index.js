@@ -9,12 +9,14 @@ import utils from './utils.js';
 import storage from './storage.js';
 import whatsappHandler from './whatsappHandler.js';
 
+const isSmokeTest = process.env.WA2DC_SMOKE_TEST === '1';
+
 if (!globalThis.crypto) {
   globalThis.crypto = nodeCrypto.webcrypto;
 }
 
 (async () => {
-    const version = 'v2.0.0-alpha.7';
+    const version = 'v2.0.0';
   state.version = version;
   const streams = [
     { stream: pino.destination('logs.txt') },
@@ -83,6 +85,9 @@ if (!globalThis.crypto) {
 
   state.settings = await storage.parseSettings();
   state.logger.info('Loaded settings.');
+  if (isSmokeTest) {
+    state.logger.info('Running in smoke-test mode; external clients are skipped.');
+  }
 
   utils.ensureDownloadServer();
 
@@ -102,57 +107,79 @@ if (!globalThis.crypto) {
   state.lastMessages = await storage.parseLastMessages();
   state.logger.info('Loaded last messages.');
 
-  state.dcClient = await discordHandler.start();
-  state.logger.info('Discord client started.');
+  if (!isSmokeTest) {
+    state.dcClient = await discordHandler.start();
+    state.logger.info('Discord client started.');
 
-  await utils.discord.repairChannels();
-  await discordHandler.setControlChannel();
-  state.logger.info('Repaired channels.');
+    await utils.discord.repairChannels();
+    await discordHandler.setControlChannel();
+    state.logger.info('Repaired channels.');
+  } else {
+    state.logger.info('Skipping Discord bootstrap for smoke test.');
+  }
 
-  // Send any queued crash report
-  try {
-    const crashFile = 'crash-report.txt';
-    const queued = await fs.promises.readFile(crashFile, 'utf8');
-    const ctrl = await utils.discord.getControlChannel();
-    if (ctrl) {
-      if (queued.length > 2000) {
-        await ctrl.send({
-          content: `${queued.slice(0, 1997)}...`,
-          files: [{ attachment: Buffer.from(queued, 'utf8'), name: 'crash.txt' }],
-        });
-      } else {
-        await ctrl.send(queued);
+  if (!isSmokeTest) {
+    // Send any queued crash report
+    try {
+      const crashFile = 'crash-report.txt';
+      const queued = await fs.promises.readFile(crashFile, 'utf8');
+      const ctrl = await utils.discord.getControlChannel();
+      if (ctrl) {
+        if (queued.length > 2000) {
+          await ctrl.send({
+            content: `${queued.slice(0, 1997)}...`,
+            files: [{ attachment: Buffer.from(queued, 'utf8'), name: 'crash.txt' }],
+          });
+        } else {
+          await ctrl.send(queued);
+        }
+        await fs.promises.unlink(crashFile);
+        state.logger.info('Queued crash report sent.');
       }
-      await fs.promises.unlink(crashFile);
-      state.logger.info('Queued crash report sent.');
+    } catch (e) {
+      if (e.code !== 'ENOENT') {
+        state.logger.error('Failed to send queued crash report');
+        state.logger.error(e);
+      }
     }
-  } catch (e) {
-    if (e.code !== 'ENOENT') {
-      state.logger.error('Failed to send queued crash report');
-      state.logger.error(e);
-    }
+  } else {
+    state.logger.info('Skipping crash report replay for smoke test.');
   }
 
-  await whatsappHandler.start();
-  state.logger.info('WhatsApp client started.');
-
-  await utils.updater.run(version, { prompt: false });
-  state.logger.info('Update checked.');
-
-  if (state.updateInfo) {
-    const ctrl = await utils.discord.getControlChannel();
-    const message = utils.updater.formatUpdateMessage(state.updateInfo);
-    await utils.discord.sendPartitioned(ctrl, message);
+  if (!isSmokeTest) {
+    await whatsappHandler.start();
+    state.logger.info('WhatsApp client started.');
+  } else {
+    state.logger.info('Skipping WhatsApp bootstrap for smoke test.');
   }
 
-  setInterval(async () => {
+  if (!isSmokeTest) {
     await utils.updater.run(version, { prompt: false });
+    state.logger.info('Update checked.');
+
     if (state.updateInfo) {
-      const ch = await utils.discord.getControlChannel();
+      const ctrl = await utils.discord.getControlChannel();
       const message = utils.updater.formatUpdateMessage(state.updateInfo);
-      await utils.discord.sendPartitioned(ch, message);
+      await utils.discord.sendPartitioned(ctrl, message);
     }
-  }, 2 * 24 * 60 * 60 * 1000);
+
+    setInterval(async () => {
+      await utils.updater.run(version, { prompt: false });
+      if (state.updateInfo) {
+        const ch = await utils.discord.getControlChannel();
+        const message = utils.updater.formatUpdateMessage(state.updateInfo);
+        await utils.discord.sendPartitioned(ch, message);
+      }
+    }, 2 * 24 * 60 * 60 * 1000);
+  } else {
+    state.logger.info('Skipping update checks for smoke test.');
+  }
 
   state.logger.info('Bot is now running. Press CTRL-C to exit.');
+
+  if (isSmokeTest) {
+    clearInterval(autoSaver);
+    state.logger.info('Smoke test completed successfully.');
+    process.exit(0);
+  }
 })();
