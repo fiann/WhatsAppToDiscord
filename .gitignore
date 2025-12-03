@@ -10,3 +10,9 @@ build/
 storage/
 out.js
 .env
+.vscode/settings.json
+tests/__pycache__/test_auth_store.cpython-313-pytest-9.0.0.pyc
+tests/__pycache__/test_boot.cpython-313-pytest-9.0.0.pyc
+tests/__pycache__/test_discord_bridge.cpython-313-pytest-9.0.0.pyc
+tests/__pycache__/test_state.cpython-313-pytest-9.0.0.pyc
+tests/__pycache__/test_whatsapp_bridge.cpython-313-pytest-9.0.0.pyc
