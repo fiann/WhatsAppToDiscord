@@ -29,6 +29,28 @@ const getReconnectDelayMs = (retry) => {
     return Math.min(baseDelay * 2 ** (slowAttempt - 1), maxDelay);
 };
 
+const patchSendMessageForLinkPreviews = (client) => {
+    if (!client || client.__wa2dcLinkPreviewPatched) {
+        return;
+    }
+    const defaultGetUrlInfo = (text) => utils.whatsapp.generateLinkPreview(text, {
+        uploadImage: typeof client.waUploadToServer === 'function' ? client.waUploadToServer : undefined,
+        logger: state.logger,
+    });
+    const baseSendMessage = client.sendMessage.bind(client);
+    client.sendMessage = async (jid, content, options) => {
+        const normalizedOptions = options ? { ...options } : {};
+        if (!normalizedOptions.logger) {
+            normalizedOptions.logger = state.logger;
+        }
+        if (!normalizedOptions.getUrlInfo) {
+            normalizedOptions.getUrlInfo = defaultGetUrlInfo;
+        }
+        return baseSendMessage(jid, content, normalizedOptions);
+    };
+    client.__wa2dcLinkPreviewPatched = true;
+};
+
 const ensureSignalStoreSupport = async (keyStore) => {
     if (!keyStore?.get || !keyStore?.set) {
         return;
@@ -91,6 +113,7 @@ const connectToWhatsApp = async (retry = 1) => {
         browser: ["Firefox (Linux)", "", ""]
     });
     client.contacts = state.contacts;
+    patchSendMessageForLinkPreviews(client);
 
     client.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
