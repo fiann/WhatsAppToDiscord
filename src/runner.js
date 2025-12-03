@@ -40,7 +40,8 @@ async function main() {
     return;
   }
 
-  cluster.setupPrimary({ execArgv: ['--no-deprecation'] });
+  const clusterExecArgv = process.pkg ? [] : ['--no-deprecation'];
+  cluster.setupPrimary({ execArgv: clusterExecArgv });
 
   const logger = pino({}, pino.multistream([
     { stream: pino.destination('logs.txt') },
