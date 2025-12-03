@@ -95,6 +95,17 @@ const extractUrlCandidate = (text = '') => {
   return null;
 };
 
+const replaceFirstInstance = (text, search, replacement) => {
+  if (!text || !search) {
+    return text;
+  }
+  const index = text.indexOf(search);
+  if (index === -1) {
+    return text;
+  }
+  return `${text.slice(0, index)}${replacement}${text.slice(index + search.length)}`;
+};
+
 const normalizePreviewUrl = (value = '') => {
   const trimmed = stripTrailingPunctuation(stripUrlDelimiters(value).trim());
   if (!trimmed) {
@@ -202,12 +213,14 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
   const firstImage = preview.images?.find((imageUrl) => typeof imageUrl === 'string' && imageUrl.startsWith('http'));
   if (firstImage) {
     urlInfo.originalThumbnailUrl = firstImage;
-    const { jpegThumbnail, highQualityThumbnail } = await buildHighQualityThumbnail(firstImage, uploadImage, LINK_PREVIEW_FETCH_OPTS);
-    if (jpegThumbnail) {
-      urlInfo.jpegThumbnail = jpegThumbnail;
-    }
-    if (highQualityThumbnail) {
-      urlInfo.highQualityThumbnail = highQualityThumbnail;
+    if (!process.pkg && typeof uploadImage === 'function') {
+      const { jpegThumbnail, highQualityThumbnail } = await buildHighQualityThumbnail(firstImage, uploadImage, LINK_PREVIEW_FETCH_OPTS);
+      if (jpegThumbnail) {
+        urlInfo.jpegThumbnail = jpegThumbnail;
+      }
+      if (highQualityThumbnail) {
+        urlInfo.highQualityThumbnail = highQualityThumbnail;
+      }
     }
   }
 
@@ -793,6 +806,26 @@ const discord = {
   stripCustomEmojiCodes(text = '') {
     if (!text) return '';
     return text.replace(CUSTOM_EMOJI_REGEX, ' ').replace(/  +/g, ' ');
+  },
+  ensureExplicitUrlScheme(text = '') {
+    const candidate = extractUrlCandidate(text);
+    if (!candidate) {
+      return { text, matched: null, normalized: null };
+    }
+    const normalized = normalizePreviewUrl(candidate);
+    if (!normalized || normalized === candidate) {
+      return { text, matched: candidate, normalized: normalized || candidate };
+    }
+    const variants = [candidate, `<${candidate}>`];
+    let updated = text;
+    for (const variant of variants) {
+      const next = replaceFirstInstance(updated, variant, normalized);
+      if (next !== updated) {
+        updated = next;
+        break;
+      }
+    }
+    return { text: updated, matched: candidate, normalized };
   },
   extractCustomEmojiData(message) {
     const content = message?.content ?? '';

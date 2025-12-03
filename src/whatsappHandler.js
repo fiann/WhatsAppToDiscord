@@ -331,6 +331,7 @@ const connectToWhatsApp = async (retry = 1) => {
 
         const emojiData = utils.discord.extractCustomEmojiData(message);
         const hasOnlyCustomEmoji = emojiData.matches.length > 0 && emojiData.rawWithoutEmoji.trim() === '';
+        const emojiFallbackText = emojiData.matches.map((entry) => `:${entry.name}:`).join(' ');
 
         let text = utils.whatsapp.convertDiscordFormatting(message.cleanContent ?? '');
         if (message.reference) {
@@ -340,20 +341,16 @@ const connectToWhatsApp = async (retry = 1) => {
             text = text.replace(/^@\S+\s*/, '');
         }
 
-        text = utils.discord.stripCustomEmojiCodes(text);
-        let trimmedText = text.trim();
-
-        if (!trimmedText && hasOnlyCustomEmoji) {
-            text = emojiData.matches.map((entry) => `:${entry.name}:`).join(' ');
-            trimmedText = text.trim();
-        } else {
-            text = trimmedText;
-        }
+        const stripped = utils.discord.stripCustomEmojiCodes(text).trim();
+        let composedText = stripped;
 
         if (state.settings.DiscordPrefix) {
             const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
-            text = trimmedText ? `*${prefix}*\n${trimmedText}` : `*${prefix}*`;
+            composedText = stripped ? `*${prefix}*\n${stripped}` : `*${prefix}*`;
         }
+
+        const urlEnforcement = utils.discord.ensureExplicitUrlScheme(composedText);
+        text = urlEnforcement.text;
 
         const media = utils.discord.collectMessageMedia(message, {
             includeEmojiAttachments: hasOnlyCustomEmoji,
@@ -382,7 +379,8 @@ const connectToWhatsApp = async (retry = 1) => {
                 const doc = utils.whatsapp.createDocumentContent(file);
                 if (!doc) continue;
                 if (first) {
-                    if (text || mentionJids.length) doc.caption = text;
+                    const captionText = hasOnlyCustomEmoji ? '' : text;
+                    if (captionText || mentionJids.length) doc.caption = captionText;
                     if (mentionJids.length) doc.mentions = mentionJids;
                 }
                 try {
@@ -403,6 +401,8 @@ const connectToWhatsApp = async (retry = 1) => {
         const fallbackParts = [];
         if (text) {
             fallbackParts.push(text);
+        } else if (hasOnlyCustomEmoji && emojiFallbackText) {
+            fallbackParts.push(emojiFallbackText);
         }
         const attachmentLinks = attachments.map((file) => file.url).filter(Boolean);
         fallbackParts.push(...attachmentLinks);
