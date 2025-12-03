@@ -87,7 +87,7 @@ const connectToWhatsApp = async (retry = 1) => {
         markOnlineOnConnect: false,
         syncFullHistory: true,
         shouldSyncHistoryMessage: () => true,
-        generateHighQualityLinkPreview: false,
+        generateHighQualityLinkPreview: true,
         browser: ["Firefox (Linux)", "", ""]
     });
     client.contacts = state.contacts;
@@ -315,7 +315,12 @@ const connectToWhatsApp = async (retry = 1) => {
             return;
         }
         
-        const options = {};
+        const options = {
+            getUrlInfo: (urlText) => utils.whatsapp.generateLinkPreview(urlText, {
+                uploadImage: typeof client.waUploadToServer === 'function' ? client.waUploadToServer : undefined,
+                logger: state.logger,
+            }),
+        };
 
         if (message.reference) {
             options.quoted = await utils.whatsapp.createQuoteMessage(message);
@@ -324,7 +329,10 @@ const connectToWhatsApp = async (retry = 1) => {
             }
         }
 
-        let text = utils.whatsapp.convertDiscordFormatting(message.cleanContent);
+        const emojiData = utils.discord.extractCustomEmojiData(message);
+        const hasOnlyCustomEmoji = emojiData.matches.length > 0 && emojiData.rawWithoutEmoji.trim() === '';
+
+        let text = utils.whatsapp.convertDiscordFormatting(message.cleanContent ?? '');
         if (message.reference) {
             // Discord prepends a mention to replies which results in all
             // participants being tagged on WhatsApp. Remove the leading
@@ -332,53 +340,75 @@ const connectToWhatsApp = async (retry = 1) => {
             text = text.replace(/^@\S+\s*/, '');
         }
 
+        if (!text.trim() && hasOnlyCustomEmoji) {
+            text = emojiData.matches.map((entry) => `:${entry.name}:`).join(' ');
+        }
+
         if (state.settings.DiscordPrefix) {
             const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
             text = `*${prefix}*\n${text}`;
         }
 
+        const media = utils.discord.collectMessageMedia(message, {
+            includeEmojiAttachments: hasOnlyCustomEmoji,
+            emojiMatches: emojiData.matches,
+        });
+        const attachments = media.attachments || [];
+        const consumedUrls = media.consumedUrls || [];
+        const shouldSendAttachments = state.settings.UploadAttachments && attachments.length > 0;
+
+        if (shouldSendAttachments && consumedUrls.length && text) {
+            for (const consumed of consumedUrls) {
+                if (!consumed) continue;
+                const variants = [consumed, `<${consumed}>`];
+                for (const variant of variants) {
+                    text = text.split(variant).join(' ');
+                }
+            }
+            text = text.replace(/\s{2,}/g, ' ').trim();
+        }
+
         const mentionJids = utils.whatsapp.getMentionedJids(text);
 
-        if (state.settings.UploadAttachments && message.attachments.size) {
+        if (shouldSendAttachments) {
             let first = true;
-            for (const file of message.attachments.values()) {
+            for (const file of attachments) {
                 const doc = utils.whatsapp.createDocumentContent(file);
+                if (!doc) continue;
                 if (first) {
                     if (text || mentionJids.length) doc.caption = text;
                     if (mentionJids.length) doc.mentions = mentionJids;
-                    try {
-                        const m = await client.sendMessage(jid, doc, options);
-                        state.lastMessages[message.id] = m.key.id;
-                        state.lastMessages[m.key.id] = message.id;
-                        state.sentMessages.add(m.key.id);
-                    } catch (err) {
-                        state.logger?.error(err);
-                    }
+                }
+                try {
+                    const sentMessage = await client.sendMessage(jid, doc, first ? options : undefined);
+                    state.lastMessages[message.id] = sentMessage.key.id;
+                    state.lastMessages[sentMessage.key.id] = message.id;
+                    state.sentMessages.add(sentMessage.key.id);
+                } catch (err) {
+                    state.logger?.error(err);
+                }
+                if (first) {
                     first = false;
-                } else {
-                    try {
-                        const m = await client.sendMessage(jid, doc);
-                        state.lastMessages[message.id] = m.key.id;
-                        state.lastMessages[m.key.id] = message.id;
-                        state.sentMessages.add(m.key.id);
-                    } catch (err) {
-                        state.logger?.error(err);
-                    }
                 }
             }
             return;
         }
 
-        const content = {};
-        content.text = state.settings.UploadAttachments
-            ? text || ""
-            : [text, ...Array.from(message.attachments.values()).map((file) => file.url)].join(' ');
+        const fallbackParts = [];
+        if (text) {
+            fallbackParts.push(text);
+        }
+        const attachmentLinks = attachments.map((file) => file.url).filter(Boolean);
+        fallbackParts.push(...attachmentLinks);
+        const finalText = fallbackParts.join(' ').trim();
+        if (!finalText) {
+            return;
+        }
 
+        const content = { text: finalText };
         if (mentionJids.length) {
             content.mentions = mentionJids;
         }
-
-        if (content.text === "") return;
 
         try {
             const sent = await client.sendMessage(jid, content, options);

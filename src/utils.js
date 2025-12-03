@@ -1,5 +1,5 @@
 import discordJs from 'discord.js';
-import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, downloadContentFromMessage, prepareWAMessageMedia } from '@whiskeysockets/baileys';
 import readline from 'readline';
 import QRCode from 'qrcode';
 import crypto from 'crypto';
@@ -11,12 +11,183 @@ import { pathToFileURL } from 'url';
 import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
+import { getLinkPreview } from 'link-preview-js';
 
 import state from './state.js';
 
-const { Webhook, MessageAttachment } = discordJs;
+const { Webhook, MessageAttachment, Constants: DiscordConstants } = discordJs;
+const { StickerFormatTypes } = DiscordConstants;
 
 const downloadTokens = new Map();
+const CUSTOM_EMOJI_REGEX = /<(a?):([a-zA-Z0-9_]{1,32}):(\d+)>/g;
+const GIF_URL_EXTENSION_REGEX = /\.(gif|mp4|webm)$/i;
+const GIF_PROVIDER_HINTS = ['tenor', 'giphy', 'imgur', 'gyazo'];
+const isKnownGifProvider = (value = '') => GIF_PROVIDER_HINTS.some((hint) => value.includes(hint));
+const MIME_BY_EXTENSION = {
+  gif: 'image/gif',
+  png: 'image/png',
+  apng: 'image/png',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+};
+const LINK_PREVIEW_FETCH_TIMEOUT_MS = 3000;
+const LINK_PREVIEW_MAX_REDIRECTS = 5;
+const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
+
+const sanitizeFileName = (name = '', fallback = 'file') => {
+  const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
+  return normalized || fallback;
+};
+
+const guessExtensionFromUrl = (url = '') => {
+  const match = url.match(/\.([a-z0-9]+)(?:[?#]|$)/i);
+  return match ? match[1].toLowerCase() : null;
+};
+
+const extensionToMime = (ext = '') => MIME_BY_EXTENSION[ext] || 'application/octet-stream';
+
+const pickEmbedMediaUrl = (embed = {}) => {
+  const candidates = [
+    embed.video?.url,
+    embed.video?.proxyURL,
+    embed.image?.url,
+    embed.image?.proxyURL,
+    embed.thumbnail?.url,
+    embed.thumbnail?.proxyURL,
+  ];
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.startsWith('http')) || null;
+};
+
+const isSupportedGifUrl = (url = '') => GIF_URL_EXTENSION_REGEX.test(url);
+
+const dedupeAttachments = (attachments = []) => {
+  const seen = new Set();
+  return attachments.filter((attachment) => {
+    const key = `${attachment?.url || ''}|${attachment?.name || ''}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+};
+
+const normalizePreviewUrl = (value = '') => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const hasScheme = /^[a-z]+:/i.test(trimmed);
+  const candidate = hasScheme ? trimmed : `https://${trimmed}`;
+  try {
+    const url = new URL(candidate);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+};
+
+const hostWithoutWww = (hostname = '') => hostname.replace(/^www\./, '');
+
+const createRedirectHandler = () => {
+  let redirects = 0;
+  return (baseURL, forwardedURL) => {
+    if (redirects >= LINK_PREVIEW_MAX_REDIRECTS) {
+      return false;
+    }
+    try {
+      const baseHost = hostWithoutWww(new URL(baseURL).hostname || '');
+      const forwardedHost = hostWithoutWww(new URL(forwardedURL).hostname || '');
+      if (baseHost && forwardedHost && baseHost === forwardedHost) {
+        redirects += 1;
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+    return false;
+  };
+};
+
+const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) => {
+  if (typeof uploadImage !== 'function' || !imageUrl) {
+    return {};
+  }
+  try {
+    const { imageMessage } = await prepareWAMessageMedia({ image: { url: imageUrl } }, {
+      upload: uploadImage,
+      mediaTypeOverride: 'thumbnail-link',
+      options: fetchOpts,
+    });
+    if (!imageMessage) {
+      return {};
+    }
+    const jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
+    return {
+      jpegThumbnail,
+      highQualityThumbnail: imageMessage,
+    };
+  } catch (err) {
+    state.logger?.warn({ err, imageUrl }, 'Failed to upload high quality thumbnail for preview');
+    return {};
+  }
+};
+
+const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
+  const normalizedUrl = normalizePreviewUrl(text);
+  if (!normalizedUrl) {
+    return undefined;
+  }
+
+  let preview;
+  try {
+    preview = await getLinkPreview(normalizedUrl, {
+      ...LINK_PREVIEW_FETCH_OPTS,
+      followRedirects: 'follow',
+      handleRedirects: createRedirectHandler(),
+    });
+  } catch (err) {
+    if (!err?.message?.includes('receive a valid response')) {
+      logger?.warn({ err, url: normalizedUrl }, 'Failed to fetch link preview');
+    }
+    return undefined;
+  }
+
+  if (!preview) {
+    return undefined;
+  }
+
+  const urlInfo = {
+    'canonical-url': preview.url || normalizedUrl,
+    'matched-text': text,
+  };
+
+  if (preview.title) {
+    urlInfo.title = preview.title;
+  }
+  if (preview.description) {
+    urlInfo.description = preview.description;
+  }
+
+  const firstImage = preview.images?.find((imageUrl) => typeof imageUrl === 'string' && imageUrl.startsWith('http'));
+  if (firstImage) {
+    urlInfo.originalThumbnailUrl = firstImage;
+    const { jpegThumbnail, highQualityThumbnail } = await buildHighQualityThumbnail(firstImage, uploadImage, LINK_PREVIEW_FETCH_OPTS);
+    if (jpegThumbnail) {
+      urlInfo.jpegThumbnail = jpegThumbnail;
+    }
+    if (highQualityThumbnail) {
+      urlInfo.highQualityThumbnail = highQualityThumbnail;
+    }
+  }
+
+  return urlInfo;
+};
 
 function ensureWebhookReplySupport(webhook) {
   if (!webhook) return webhook;
@@ -594,6 +765,103 @@ const discord = {
       await channel.send(part);
     }
   },
+  extractCustomEmojiData(message) {
+    const content = message?.content ?? '';
+    if (!content) {
+      return { matches: [], rawWithoutEmoji: '' };
+    }
+    const matches = [...content.matchAll(CUSTOM_EMOJI_REGEX)].map(([, animatedFlag, name, id]) => ({
+      animated: animatedFlag === 'a',
+      name,
+      id,
+    }));
+    const rawWithoutEmoji = content.replace(CUSTOM_EMOJI_REGEX, ' ');
+    return { matches, rawWithoutEmoji };
+  },
+  buildCustomEmojiAttachments(matches = []) {
+    if (!matches.length) return [];
+    const unique = new Map();
+    for (const entry of matches) {
+      if (!entry?.id || unique.has(entry.id)) continue;
+      const extension = entry.animated ? 'gif' : 'png';
+      unique.set(entry.id, {
+        url: `https://cdn.discordapp.com/emojis/${entry.id}.${extension}?quality=lossless`,
+        name: `${sanitizeFileName(entry.name || 'emoji', 'emoji')}-${entry.id}.${extension}`,
+        contentType: extensionToMime(extension),
+      });
+    }
+    return [...unique.values()];
+  },
+  _buildStickerAttachment(sticker) {
+    const id = sticker?.id;
+    if (!id) return null;
+    const format = sticker?.format;
+    let extension = 'png';
+    let baseUrl = `https://cdn.discordapp.com/stickers/${id}`;
+    if (format === StickerFormatTypes.GIF) {
+      extension = 'gif';
+    } else if (format === StickerFormatTypes.LOTTIE) {
+      baseUrl = `https://media.discordapp.net/stickers/${id}`;
+    }
+    const url = `${baseUrl}.${extension}${extension === 'png' ? '?size=320' : ''}`;
+    return {
+      url,
+      name: `${sanitizeFileName(sticker?.name || 'sticker', 'sticker')}-${id}.${extension}`,
+      contentType: extensionToMime(extension),
+    };
+  },
+  collectStickerAttachments(message) {
+    const stickers = message?.stickers;
+    if (!stickers?.size) return [];
+    const attachments = [];
+    const seen = new Set();
+    for (const sticker of stickers.values()) {
+      if (!sticker || !sticker.id || seen.has(sticker.id)) continue;
+      const attachment = this._buildStickerAttachment(sticker);
+      if (attachment) {
+        seen.add(sticker.id);
+        attachments.push(attachment);
+      }
+    }
+    return attachments;
+  },
+  extractGifEmbedAttachments(message) {
+    const embeds = message?.embeds;
+    if (!Array.isArray(embeds) || !embeds.length) return [];
+    const attachments = [];
+    for (const embed of embeds) {
+      const mediaUrl = pickEmbedMediaUrl(embed);
+      if (!mediaUrl || !isSupportedGifUrl(mediaUrl)) continue;
+      const extension = guessExtensionFromUrl(mediaUrl) || 'gif';
+      const baseName = embed?.title || embed?.provider?.name || 'discord-gif';
+      const shareCandidate = (embed?.url || '').toLowerCase();
+      const providerCandidate = (embed?.provider?.name || '').toLowerCase();
+      const shouldConsumeUrl = isKnownGifProvider(shareCandidate) || isKnownGifProvider(providerCandidate);
+      attachments.push({
+        attachment: {
+          url: mediaUrl,
+          name: `${sanitizeFileName(baseName, 'discord-gif')}.${extension}`,
+          contentType: extensionToMime(extension),
+        },
+        sourceUrl: shouldConsumeUrl ? embed?.url : null,
+      });
+    }
+    return attachments;
+  },
+  collectMessageMedia(message, { includeEmojiAttachments = false, emojiMatches = [] } = {}) {
+    const baseAttachments = message?.attachments?.size ? [...message.attachments.values()] : [];
+    const stickerAttachments = this.collectStickerAttachments(message);
+    const gifEmbeds = this.extractGifEmbedAttachments(message);
+    const emojiAttachments = includeEmojiAttachments ? this.buildCustomEmojiAttachments(emojiMatches) : [];
+    const consumedUrls = gifEmbeds.map((entry) => entry.sourceUrl).filter(Boolean);
+    const combined = dedupeAttachments([
+      ...baseAttachments,
+      ...stickerAttachments,
+      ...gifEmbeds.map((entry) => entry.attachment),
+      ...emojiAttachments,
+    ]);
+    return { attachments: combined, consumedUrls };
+  },
   convertWhatsappFormatting(text = '') {
     if (!text) return text;
     let converted = text;
@@ -602,6 +870,9 @@ const discord = {
     converted = converted.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, '*$1*');
     converted = converted.replace(/~(.+?)~/g, '~~$1~~');
     return converted;
+  },
+  async generateLinkPreview(text, { uploadImage, logger } = {}) {
+    return buildLinkPreviewInfo(text, { uploadImage, logger });
   },
   async getGuild() {
     return state.dcClient.guilds.fetch(state.settings.GuildID).catch((err) => { state.logger?.error(err) });
