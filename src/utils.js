@@ -12,6 +12,7 @@ import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
 import * as linkPreview from 'link-preview-js';
+import './patches/registerJimpLoadFontStub.js';
 import 'jimp';
 
 import state from './state.js';
