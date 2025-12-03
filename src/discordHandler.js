@@ -4,12 +4,13 @@ import fs from 'fs';
 import state from './state.js';
 import utils from './utils.js';
 import storage from './storage.js';
+import { createDiscordClient } from './clientFactories.js';
 
-const { Client, Intents, Constants } = discordJs;
+const { Intents, Constants } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 
-const client = new Client({
+const client = createDiscordClient({
   intents: [
     Intents.FLAGS.GUILDS,
     Intents.FLAGS.GUILD_MESSAGES,

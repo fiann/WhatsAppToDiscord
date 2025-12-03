@@ -1,6 +1,5 @@
-import makeWASocket, {
+import {
   DisconnectReason,
-  fetchLatestBaileysVersion,
   proto,
   useMultiFileAuthState,
   WAMessageStatus,
@@ -9,6 +8,7 @@ import makeWASocket, {
 
 import utils from './utils.js';
 import state from './state.js';
+import { createWhatsAppClient, getBaileysVersion } from './clientFactories.js';
 
 
 let authState;
@@ -77,9 +77,9 @@ const migrateLegacyChats = async (client) => {
 
 const connectToWhatsApp = async (retry = 1) => {
     const controlChannel = await utils.discord.getControlChannel();
-    const { version } = await fetchLatestBaileysVersion();
+    const { version } = await getBaileysVersion();
 
-    const client = makeWASocket({
+    const client = createWhatsAppClient({
         version,
         printQRInTerminal: false,
         auth: authState,
@@ -135,7 +135,8 @@ const connectToWhatsApp = async (retry = 1) => {
             }
         }
     });
-    client.ev.on('creds.update', saveState);
+    const credsListener = typeof saveState === 'function' ? saveState : () => {};
+    client.ev.on('creds.update', credsListener);
     const contactUpdater = utils.whatsapp.updateContacts.bind(utils.whatsapp);
     ['chats.set', 'contacts.set', 'chats.upsert', 'chats.update', 'contacts.upsert', 'contacts.update', 'groups.upsert', 'groups.update']
       .forEach((eventName) => client.ev.on(eventName, contactUpdater));
@@ -493,4 +494,5 @@ const actions = {
     },
 };
 
+export { connectToWhatsApp };
 export default actions;
