@@ -17,8 +17,9 @@ import './patches/registerJimpLoadFontStub.js';
 import 'jimp';
 
 import state from './state.js';
+import storage from './storage.js';
 
-const { Webhook, MessageAttachment, Constants: DiscordConstants } = discordJs;
+const { Webhook, MessageAttachment, MessageActionRow, MessageButton, Constants: DiscordConstants } = discordJs;
 const { StickerFormatTypes } = DiscordConstants;
 
 const downloadTokens = new Map();
@@ -41,6 +42,10 @@ const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
 const EXPLICIT_URL_REGEX = /<?https?:\/\/[^\s>]+>?/i;
 const BARE_URL_REGEX = /(?:^|[\s<])((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=+#]*)?)/i;
 const TRAILING_PUNCTUATION_REGEX = /[)\],.;!?]+$/;
+const UPDATE_BUTTON_IDS = {
+  APPLY: 'wa2dc:update',
+  SKIP: 'wa2dc:skip-update',
+};
 const getLinkPreviewFn = typeof linkPreview === 'function'
   ? linkPreview
   : linkPreview?.getLinkPreview
@@ -660,10 +665,10 @@ const updater = {
     ];
 
     if (updateInfo.canSelfUpdate) {
-      lines.push('Type `update` to apply or `skipUpdate` to ignore.');
+      lines.push('Use /update or the buttons below to install, or /skipupdate to ignore.');
     } else {
       lines.push(
-        'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart.'
+        'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart. Use Skip Update to dismiss this reminder.'
       );
     }
 
@@ -796,6 +801,7 @@ const sqliteToJson = {
 }
 
 const discord = {
+  updateButtonIds: UPDATE_BUTTON_IDS,
   channelIdToJid(channelId) {
     return Object.keys(state.chats).find((key) => state.chats[key].channelId === channelId);
   },
@@ -1394,6 +1400,90 @@ const discord = {
       });
     }
     return channel;
+  },
+  async _fetchUpdatePromptMessage() {
+    const ref = state.settings.UpdatePromptMessage;
+    if (!ref?.messageId) {
+      return null;
+    }
+    const channelId = ref.channelId || state.settings.ControlChannelID;
+    try {
+      const channel = await this.getChannel(channelId);
+      if (!channel) {
+        state.settings.UpdatePromptMessage = null;
+        return null;
+      }
+      const message = await channel.messages.fetch(ref.messageId);
+      return message;
+    } catch (err) {
+      state.logger?.debug?.({ err }, 'Failed to fetch stored update prompt message');
+      state.settings.UpdatePromptMessage = null;
+      return null;
+    }
+  },
+  async ensureUpdatePrompt(updateInfo) {
+    if (!updateInfo) {
+      await this.clearUpdatePrompt();
+      return;
+    }
+    const content = updater.formatUpdateMessage(updateInfo);
+    const components = [
+      new MessageActionRow().addComponents(
+        new MessageButton()
+          .setCustomId(UPDATE_BUTTON_IDS.APPLY)
+          .setLabel('Update')
+          .setStyle('PRIMARY')
+          .setDisabled(!updateInfo.canSelfUpdate),
+        new MessageButton()
+          .setCustomId(UPDATE_BUTTON_IDS.SKIP)
+          .setLabel('Skip update')
+          .setStyle('SECONDARY'),
+      ),
+    ];
+
+    let message = await this._fetchUpdatePromptMessage();
+    if (message) {
+      await message.edit({ content, components });
+      return;
+    }
+
+    const channel = await this.getControlChannel();
+    if (!channel) {
+      return;
+    }
+    message = await channel.send({ content, components });
+    state.settings.UpdatePromptMessage = {
+      channelId: channel.id,
+      messageId: message.id,
+    };
+    try {
+      await storage.save();
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to persist update prompt metadata');
+    }
+  },
+  async clearUpdatePrompt() {
+    const ref = state.settings.UpdatePromptMessage;
+    const hadStoredMessage = Boolean(ref);
+    if (ref?.messageId) {
+      const message = await this._fetchUpdatePromptMessage();
+      await message?.delete().catch(() => {});
+    }
+    state.settings.UpdatePromptMessage = null;
+    if (hadStoredMessage) {
+      try {
+        await storage.save();
+      } catch (err) {
+        state.logger?.warn({ err }, 'Failed to persist cleared update prompt metadata');
+      }
+    }
+  },
+  async syncUpdatePrompt() {
+    if (state.updateInfo) {
+      await this.ensureUpdatePrompt(state.updateInfo);
+    } else {
+      await this.clearUpdatePrompt();
+    }
   },
   async findAvailableName(dir, fileName) {
     let absPath;

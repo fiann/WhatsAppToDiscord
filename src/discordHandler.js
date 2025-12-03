@@ -24,6 +24,7 @@ const pendingAlbums = {};
 const deliveredMessages = new Set();
 const FORCE_TOKENS = new Set(['--force', '-f']);
 const BOT_PERMISSIONS = 536879120;
+const UPDATE_BUTTON_IDS = utils.discord.updateButtonIds;
 
 class CommandResponder {
   constructor({ interaction, channel }) {
@@ -1488,6 +1489,7 @@ const commandHandlers = {
       state.settings.UpdateChannel = channel;
       await ctx.reply(`Update channel set to ${channel}. Checking for new releases...`);
       await utils.updater.run(state.version, { prompt: false });
+      await utils.discord.syncUpdatePrompt();
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
         await ctx.replyPartitioned(message);
@@ -1520,6 +1522,8 @@ const commandHandlers = {
       }
 
       await ctx.reply('Update downloaded. Restarting...');
+      state.updateInfo = null;
+      await utils.discord.syncUpdatePrompt();
       await fs.promises.writeFile('restart.flag', '');
       process.exit();
     },
@@ -1529,6 +1533,7 @@ const commandHandlers = {
     async execute(ctx) {
       await ctx.defer();
       await utils.updater.run(state.version, { prompt: false });
+      await utils.discord.syncUpdatePrompt();
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
         await ctx.replyPartitioned(message);
@@ -1541,6 +1546,7 @@ const commandHandlers = {
     description: 'Clear the current update notification.',
     async execute(ctx) {
       state.updateInfo = null;
+      await utils.discord.syncUpdatePrompt();
       await ctx.reply('Update skipped.');
     },
   },
@@ -1624,16 +1630,32 @@ const executeCommand = async (name, ctx) => {
   await handler.execute(ctx);
 };
 
+const handleInteractionCommand = async (interaction, commandName) => {
+  const responder = new CommandResponder({ interaction, channel: interaction.channel });
+  await responder.defer();
+  const ctx = new CommandContext({ interaction, responder });
+  await executeCommand(commandName, ctx);
+};
+
 client.on('interactionCreate', async (interaction) => {
+  if (interaction.isButton()) {
+    if (interaction.customId === UPDATE_BUTTON_IDS.APPLY) {
+      await handleInteractionCommand(interaction, 'update');
+      return;
+    }
+    if (interaction.customId === UPDATE_BUTTON_IDS.SKIP) {
+      await handleInteractionCommand(interaction, 'skipupdate');
+      return;
+    }
+    return;
+  }
+
   if (!interaction.isCommand?.() && !interaction.isChatInputCommand?.()) {
     return;
   }
 
-  const responder = new CommandResponder({ interaction, channel: interaction.channel });
-  await responder.defer();
-  const ctx = new CommandContext({ interaction, responder });
   const commandName = interaction.commandName?.toLowerCase();
-  await executeCommand(commandName, ctx);
+  await handleInteractionCommand(interaction, commandName);
 });
 
 client.on('messageCreate', async (message) => {
@@ -1642,16 +1664,7 @@ client.on('messageCreate', async (message) => {
   }
 
   if (message.channel.id === state.settings.ControlChannelID) {
-    const [commandNameRaw, ...rawArgs] = message.content.trim().split(/\s+/);
-    const commandName = (commandNameRaw || '').toLowerCase();
-    const responder = new CommandResponder({ channel: controlChannel || message.channel });
-    const ctx = new CommandContext({
-      message,
-      responder,
-      rawArgs,
-      lowerArgs: rawArgs.map((arg) => arg.toLowerCase()),
-    });
-    await executeCommand(commandName, ctx);
+    await message.channel.send('Regular commands have been removed. Please use Discord slash commands (/) instead.');
     return;
   }
 

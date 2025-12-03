@@ -156,20 +156,11 @@ if (!globalThis.crypto) {
   if (!isSmokeTest) {
     await utils.updater.run(version, { prompt: false });
     state.logger.info('Update checked.');
-
-    if (state.updateInfo) {
-      const ctrl = await utils.discord.getControlChannel();
-      const message = utils.updater.formatUpdateMessage(state.updateInfo);
-      await utils.discord.sendPartitioned(ctrl, message);
-    }
+    await utils.discord.syncUpdatePrompt();
 
     setInterval(async () => {
       await utils.updater.run(version, { prompt: false });
-      if (state.updateInfo) {
-        const ch = await utils.discord.getControlChannel();
-        const message = utils.updater.formatUpdateMessage(state.updateInfo);
-        await utils.discord.sendPartitioned(ch, message);
-      }
+      await utils.discord.syncUpdatePrompt();
     }, 2 * 24 * 60 * 60 * 1000);
   } else {
     state.logger.info('Skipping update checks for smoke test.');

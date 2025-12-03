@@ -31,6 +31,7 @@ const state = {
     ReadReceiptMode: 'public',
     UpdateChannel: 'stable',
     KeepOldBinary: true,
+    UpdatePromptMessage: null,
   },
   dcClient: null,
   waClient: null,
