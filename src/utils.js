@@ -11,7 +11,8 @@ import { pathToFileURL } from 'url';
 import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
-import { getLinkPreview } from 'link-preview-js';
+import * as linkPreview from 'link-preview-js';
+import 'jimp';
 
 import state from './state.js';
 
@@ -38,6 +39,10 @@ const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
 const EXPLICIT_URL_REGEX = /<?https?:\/\/[^\s>]+>?/i;
 const BARE_URL_REGEX = /(?:^|[\s<])((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=+#]*)?)/i;
 const TRAILING_PUNCTUATION_REGEX = /[)\],.;!?]+$/;
+const getLinkPreviewFn = typeof linkPreview === 'function'
+  ? linkPreview
+  : linkPreview?.getLinkPreview
+    || (typeof linkPreview?.default === 'function' ? linkPreview.default : null);
 
 const sanitizeFileName = (name = '', fallback = 'file') => {
   const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
@@ -172,7 +177,7 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
 
 const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
   const matchedText = extractUrlCandidate(text);
-  if (!matchedText) {
+  if (!matchedText || !getLinkPreviewFn) {
     return undefined;
   }
   const normalizedUrl = normalizePreviewUrl(matchedText);
@@ -182,7 +187,7 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
 
   let preview;
   try {
-    preview = await getLinkPreview(normalizedUrl, {
+    preview = await getLinkPreviewFn(normalizedUrl, {
       ...LINK_PREVIEW_FETCH_OPTS,
       followRedirects: 'follow',
       handleRedirects: createRedirectHandler(),

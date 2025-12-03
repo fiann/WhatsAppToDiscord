@@ -353,7 +353,7 @@ const connectToWhatsApp = async (retry = 1) => {
         text = urlEnforcement.text;
 
         const media = utils.discord.collectMessageMedia(message, {
-            includeEmojiAttachments: hasOnlyCustomEmoji,
+            includeEmojiAttachments: emojiData.matches.length > 0,
             emojiMatches: emojiData.matches,
         });
         const attachments = media.attachments || [];
