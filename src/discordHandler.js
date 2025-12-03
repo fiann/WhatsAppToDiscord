@@ -22,6 +22,7 @@ let controlChannel;
 let slashRegisterWarned = false;
 const pendingAlbums = {};
 const typingTimeouts = {};
+const whatsappTypingIntervals = {};
 const deliveredMessages = new Set();
 const FORCE_TOKENS = new Set(['--force', '-f']);
 const BOT_PERMISSIONS = 536879120;
@@ -328,6 +329,21 @@ client.on('typingStart', async (typing) => {
   }
 });
 
+client.on('typingStop', async (typing) => {
+  if ((state.settings.oneWay >> 1 & 1) === 0) { return; }
+  const { channel } = typing;
+  const jid = utils.discord.channelIdToJid(channel.id);
+  if (!jid || !state.waClient) { return; }
+  try {
+    await state.waClient.sendPresenceUpdate('paused', jid);
+  } catch (err) {
+    state.logger?.error(err);
+  } finally {
+    clearTimeout(typingTimeouts[jid]);
+    delete typingTimeouts[jid];
+  }
+});
+
 client.on('whatsappMessage', async (message) => {
   if ((state.settings.oneWay >> 0 & 1) === 0) {
     return;
@@ -395,9 +411,24 @@ client.on('whatsappReaction', async (reaction) => {
 client.on('whatsappTyping', async ({ jid, isTyping }) => {
   if ((state.settings.oneWay >> 0 & 1) === 0) { return; }
   const channelId = state.chats[jid]?.channelId;
-  if (!channelId || !isTyping) { return; }
+  if (!channelId) { return; }
+
+  if (!isTyping) {
+    clearTimeout(whatsappTypingIntervals[jid]);
+    delete whatsappTypingIntervals[jid];
+    return;
+  }
+
   const channel = await utils.discord.getChannel(channelId);
-  channel.sendTyping().catch(() => {});
+  if (!channel) { return; }
+
+  const pulseTyping = () => {
+    channel.sendTyping().catch(() => {});
+    whatsappTypingIntervals[jid] = setTimeout(pulseTyping, 7000);
+  };
+
+  clearTimeout(whatsappTypingIntervals[jid]);
+  pulseTyping();
 });
 
 client.on('whatsappRead', async ({ id, jid }) => {

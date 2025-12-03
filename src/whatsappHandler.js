@@ -73,6 +73,8 @@ const ensureSignalStoreSupport = async (keyStore) => {
     }
 };
 
+const whatsappTypingStates = new Map();
+
 const migrateLegacyChats = async (client) => {
     const store = client.signalRepository?.lidMapping;
     if (!store) return;
@@ -304,16 +306,26 @@ const connectToWhatsApp = async (retry = 1) => {
 
     client.ev.on('presence.update', async ({ id, presences }) => {
         if (!utils.whatsapp.inWhitelist({ chatId: id })) return;
-        for (const presence of Object.values(presences)) {
-            const isTyping = ['composing', 'recording'].includes(presence?.lastKnownPresence);
-            if (isTyping) {
-                state.dcClient.emit('whatsappTyping', {
-                    jid: utils.whatsapp.formatJid(id),
-                    isTyping: true,
-                });
-                break;
-            }
+        const entries = Object.values(presences || {});
+        const chatJid = utils.whatsapp.formatJid(id);
+        if (!chatJid) return;
+        const isTyping = entries.some((presence) => {
+            const status = presence?.lastKnownPresence || presence?.presence;
+            return ['composing', 'recording'].includes(status);
+        });
+        const prevState = whatsappTypingStates.get(chatJid) ?? false;
+        if (prevState === isTyping) {
+            return;
         }
+        if (isTyping) {
+            whatsappTypingStates.set(chatJid, true);
+        } else {
+            whatsappTypingStates.delete(chatJid);
+        }
+        state.dcClient.emit('whatsappTyping', {
+            jid: chatJid,
+            isTyping,
+        });
     });
 
     client.ws.on(`CB:notification,type:status,set`, async (update) => {
