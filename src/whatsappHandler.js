@@ -149,6 +149,17 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
         return false;
     }
 
+    state.logger?.info({
+        key: normalizedKey,
+        pollCreationKey: pollUpdate.pollCreationMessageKey,
+        pollMessageKey: pollMessage?.key,
+        pollCreatorJid,
+        voterJid,
+        encKeyLen: pollEncKey?.length,
+        encPayloadLen: encPayload?.length,
+        encIvLen: encIv?.length,
+    }, 'Poll vote debug');
+
     let voteMsg = null;
     try {
         voteMsg = decryptPollVote(
