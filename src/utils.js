@@ -1993,7 +1993,25 @@ const whatsapp = {
     return ts > state.startTime || id == null || !Object.prototype.hasOwnProperty.call(state.lastMessages, id);
   },
   getMessageType(rawMsg) {
-    return ['conversation', 'extendedTextMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'documentWithCaptionMessage', 'viewOnceMessageV2', 'stickerMessage', 'editedMessage'].find((el) => Object.hasOwn(rawMsg.message || {}, el));
+    return [
+      'conversation',
+      'extendedTextMessage',
+      'imageMessage',
+      'videoMessage',
+      'audioMessage',
+      'documentMessage',
+      'documentWithCaptionMessage',
+      'viewOnceMessageV2',
+      'stickerMessage',
+      'editedMessage',
+      'pollCreationMessage',
+      'pollCreationMessageV2',
+      'pollCreationMessageV3',
+      'pollCreationMessageV4',
+      'pollUpdateMessage',
+      'pollResultSnapshotMessage',
+      'pinInChatMessage',
+    ].find((el) => Object.hasOwn(rawMsg.message || {}, el));
   },
   _profilePicsCache: {},
   async getProfilePic(rawMsg) {
@@ -2030,6 +2048,25 @@ const whatsapp = {
       case 'documentWithCaptionMessage':
       case 'stickerMessage':
         content += msg.caption || '';
+        break;
+      case 'pollCreationMessage':
+      case 'pollCreationMessageV2':
+      case 'pollCreationMessageV3':
+      case 'pollCreationMessageV4': {
+        const options = Array.isArray(msg.options) ? msg.options : [];
+        const optionText = options.map((opt, idx) => `${idx + 1}. ${opt.optionName || 'Option'}`).join('\n');
+        const selectable = msg.selectableOptionsCount || msg.selectableCount;
+        content += `Poll: ${msg.name || 'Untitled poll'}`;
+        if (selectable && selectable > 1) {
+          content += ` (select up to ${selectable})`;
+        }
+        if (optionText) {
+          content += `\n${optionText}`;
+        }
+        break;
+      }
+      case 'pinInChatMessage':
+        content += 'Pinned a message';
         break;
     }
     const contextInfo = typeof msg === 'object' && msg !== null ? msg.contextInfo : undefined;

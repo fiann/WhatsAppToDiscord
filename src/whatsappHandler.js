@@ -1,6 +1,8 @@
 import {
   DisconnectReason,
+  getAggregateVotesInPollMessage,
   proto,
+  updateMessageWithPollUpdate,
   useMultiFileAuthState,
   WAMessageStatus,
   WAMessageStubType,
@@ -9,10 +11,15 @@ import {
 import utils from './utils.js';
 import state from './state.js';
 import { createWhatsAppClient, getBaileysVersion } from './clientFactories.js';
+import groupMetadataCache from './groupMetadataCache.js';
+import messageStore from './messageStore.js';
+import { createGroupRefreshScheduler } from './groupMetadataRefresh.js';
+import { getPollOptions } from './pollUtils.js';
 
 
 let authState;
 let saveState;
+let groupCachePruneInterval = null;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const formatDisconnectReason = (statusCode) => {
     if (typeof statusCode !== 'number') return 'unknown';
@@ -27,6 +34,97 @@ const getReconnectDelayMs = (retry) => {
     const baseDelay = 5000;
     const maxDelay = 60000;
     return Math.min(baseDelay * 2 ** (slowAttempt - 1), maxDelay);
+};
+
+const getPollCreation = (message = {}) => message.pollCreationMessage
+    || message.pollCreationMessageV2
+    || message.pollCreationMessageV3
+    || message.pollCreationMessageV4;
+
+const aggregatePoll = (pollMessage) => {
+    if (!pollMessage) return [];
+    const message = pollMessage.message || pollMessage;
+    const pollUpdates = pollMessage.pollUpdates || [];
+    return getAggregateVotesInPollMessage({ message, pollUpdates }, state.waClient?.user?.id);
+};
+
+const formatPollForDiscord = (pollMessage) => {
+    const poll = getPollCreation(pollMessage?.message || pollMessage);
+    if (!poll) return null;
+    const aggregates = aggregatePoll(pollMessage);
+    const selectable = poll.selectableOptionsCount || poll.selectableCount;
+    const lines = [`📊 Poll: ${poll.name || 'Untitled poll'}`];
+    if (selectable && selectable > 1) {
+        lines.push(`Select up to ${selectable} options.`);
+    }
+    aggregates.forEach((entry, idx) => {
+        const voters = (entry.voters || [])
+            .map((jid) => utils.whatsapp.jidToName(utils.whatsapp.formatJid(jid)))
+            .filter(Boolean);
+        const voteLabel = voters.length
+            ? `${voters.length} vote${voters.length === 1 ? '' : 's'}: ${voters.join(', ')}`
+            : '0 votes';
+        lines.push(`${idx + 1}. ${entry.name || 'Unknown'} — ${voteLabel}`);
+    });
+    if (!aggregates.length && Array.isArray(poll.options)) {
+        poll.options.forEach((opt, idx) => {
+            lines.push(`${idx + 1}. ${opt.optionName || 'Option'}`);
+        });
+    }
+    return lines.join('\n');
+};
+
+const isPinInChatMessage = (message = {}) => !!message?.pinInChatMessage;
+
+const storeMessage = (message) => {
+    if (!message?.key) return;
+    const normalizedKey = {
+        ...message.key,
+        remoteJid: utils.whatsapp.formatJid(message.key.remoteJid),
+        participant: utils.whatsapp.formatJid(message.key.participant || message.key.participantAlt),
+    };
+    messageStore.set({ ...message, key: normalizedKey });
+};
+
+const cacheGroupMetadata = (metadata, client) => {
+    const normalizedJid = utils.whatsapp.formatJid(metadata?.id);
+    if (!normalizedJid) {
+        return;
+    }
+    groupMetadataCache.set(normalizedJid, metadata);
+    if (metadata.subject) {
+        state.contacts[normalizedJid] = metadata.subject;
+        client.contacts[normalizedJid] = metadata.subject;
+    }
+};
+
+const refreshGroupMetadata = async (client, groupId) => {
+    const normalizedId = utils.whatsapp.formatJid(groupId);
+    if (!normalizedId) {
+        return null;
+    }
+    try {
+        groupMetadataCache.invalidate(normalizedId);
+        const metadata = await client.groupMetadata(normalizedId);
+        cacheGroupMetadata(metadata, client);
+        return metadata;
+    } catch (err) {
+        state.logger?.warn({ err, groupId: normalizedId }, 'Failed to refresh group metadata');
+        return null;
+    }
+};
+
+const patchGroupMetadataForCache = (client) => {
+    if (!client || client.__wa2dcGroupCachePatched) {
+        return;
+    }
+    const baseGroupMetadata = client.groupMetadata.bind(client);
+    client.groupMetadata = async (...args) => {
+        const metadata = await baseGroupMetadata(...args);
+        cacheGroupMetadata(metadata, client);
+        return metadata;
+    };
+    client.__wa2dcGroupCachePatched = true;
 };
 
 const patchSendMessageForLinkPreviews = (client) => {
@@ -102,6 +200,10 @@ const connectToWhatsApp = async (retry = 1) => {
     const controlChannel = await utils.discord.getControlChannel();
     const { version } = await getBaileysVersion();
 
+    if (!groupCachePruneInterval) {
+        groupCachePruneInterval = setInterval(() => groupMetadataCache.prune(), 60 * 60 * 1000);
+    }
+
     const client = createWhatsAppClient({
         version,
         printQRInTerminal: false,
@@ -111,10 +213,16 @@ const connectToWhatsApp = async (retry = 1) => {
         syncFullHistory: true,
         shouldSyncHistoryMessage: () => true,
         generateHighQualityLinkPreview: true,
+        cachedGroupMetadata: async (jid) => groupMetadataCache.get(utils.whatsapp.formatJid(jid)),
+        getMessage: async (key) => messageStore.get({ ...key, remoteJid: utils.whatsapp.formatJid(key?.remoteJid) }),
         browser: ["Firefox (Linux)", "", ""]
     });
     client.contacts = state.contacts;
     patchSendMessageForLinkPreviews(client);
+    patchGroupMetadataForCache(client);
+    const groupRefreshScheduler = createGroupRefreshScheduler({
+        refreshFn: (jid) => refreshGroupMetadata(client, jid),
+    });
 
     client.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -123,6 +231,8 @@ const connectToWhatsApp = async (retry = 1) => {
         }
         if (connection === 'close') {
             state.logger.error(lastDisconnect?.error);
+            groupRefreshScheduler.clearAll();
+            groupMetadataCache.clear();
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession) {
                 await controlChannel.send('WhatsApp session invalid. Please rescan the QR code.');
@@ -149,6 +259,7 @@ const connectToWhatsApp = async (retry = 1) => {
 
             try {
                 const groups = await client.groupFetchAllParticipating();
+                groupMetadataCache.prime(groups);
                 for (const [jid, data] of Object.entries(groups)) {
                     state.contacts[jid] = data.subject;
                     client.contacts[jid] = data.subject;
@@ -164,6 +275,30 @@ const connectToWhatsApp = async (retry = 1) => {
     const contactUpdater = utils.whatsapp.updateContacts.bind(utils.whatsapp);
     ['chats.set', 'contacts.set', 'chats.upsert', 'chats.update', 'contacts.upsert', 'contacts.update', 'groups.upsert', 'groups.update']
       .forEach((eventName) => client.ev.on(eventName, contactUpdater));
+
+    client.ev.on('groups.upsert', async (groups) => {
+        const list = Array.isArray(groups) ? groups : [groups];
+        for (const group of list) {
+            cacheGroupMetadata(group, client);
+            groupRefreshScheduler.schedule(group.id);
+        }
+    });
+
+    client.ev.on('groups.update', async (updates = []) => {
+        const list = Array.isArray(updates) ? updates : [updates];
+        for (const update of list) {
+            if (!update?.id) continue;
+            if (update.subject) {
+                cacheGroupMetadata({ id: update.id, subject: update.subject }, client);
+            }
+            groupRefreshScheduler.schedule(update.id);
+        }
+    });
+
+    client.ev.on('group-participants.update', async (event) => {
+        if (!event?.id) return;
+        groupRefreshScheduler.schedule(event.id);
+    });
 
     client.ev.on('lid-mapping.update', ({ lid, pn }) => {
         const normalizedLid = utils.whatsapp.formatJid(lid);
@@ -187,7 +322,59 @@ const connectToWhatsApp = async (retry = 1) => {
                     continue;
                 }
                 const messageType = utils.whatsapp.getMessageType(rawMessage);
+                storeMessage(rawMessage);
                 if (!utils.whatsapp.inWhitelist(rawMessage) || !utils.whatsapp.sentAfterStart(rawMessage) || !messageType) continue;
+
+                const channelJid = await utils.whatsapp.getChannelJid(rawMessage);
+                if (!channelJid) {
+                    continue;
+                }
+
+                if (isPinInChatMessage(rawMessage.message)) {
+                    const { pinInChatMessage } = rawMessage.message;
+                    const targetKey = {
+                        ...pinInChatMessage.key,
+                        remoteJid: utils.whatsapp.formatJid(pinInChatMessage.key?.remoteJid || channelJid),
+                    };
+                    const isPin = pinInChatMessage.type === proto.Message.PinInChatMessage.Type.PIN_FOR_ALL
+                        || pinInChatMessage.type === 1;
+                    if (state.sentPins.has(targetKey.id)) {
+                        state.sentPins.delete(targetKey.id);
+                    } else {
+                        state.dcClient.emit('whatsappPin', {
+                            jid: channelJid,
+                            key: targetKey,
+                            pinned: isPin,
+                            actor: await utils.whatsapp.getSenderName(rawMessage),
+                        });
+                    }
+                    continue;
+                }
+
+                const pollCreation = getPollCreation(rawMessage.message);
+                if (pollCreation) {
+                    const pollText = formatPollForDiscord(rawMessage);
+                    const name = await utils.whatsapp.getSenderName(rawMessage);
+                    const pollOptions = getPollOptions(pollCreation);
+                    state.dcClient.emit('whatsappMessage', {
+                        id: utils.whatsapp.getId(rawMessage),
+                        name,
+                        content: pollText || pollCreation.name || 'Poll',
+                        quote: await utils.whatsapp.getQuote(rawMessage),
+                        file: null,
+                        profilePic: await utils.whatsapp.getProfilePic(rawMessage),
+                        channelJid,
+                        isGroup: utils.whatsapp.isGroup(rawMessage),
+                        isForwarded: utils.whatsapp.isForwarded(rawMessage.message),
+                        isEdit: false,
+                        isPoll: true,
+                        pollOptions,
+                        pollSelectableCount: pollCreation.selectableOptionsCount || pollCreation.selectableCount || 1,
+                    });
+                    const ts = utils.whatsapp.getTimestamp(rawMessage);
+                    if (ts > state.startTime) state.startTime = ts;
+                    continue;
+                }
 
                 const [nMsgType, message] = utils.whatsapp.getMessage(rawMessage, messageType);
                 state.dcClient.emit('whatsappMessage', {
@@ -245,6 +432,63 @@ const connectToWhatsApp = async (retry = 1) => {
 
     client.ev.on('messages.update', async (updates) => {
         for (const { update, key } of updates) {
+            if (Array.isArray(update.pollUpdates) && update.pollUpdates.length) {
+                    const pollMessage = messageStore.get({ ...key, remoteJid: utils.whatsapp.formatJid(key?.remoteJid) });
+                    if (!pollMessage) {
+                        state.logger?.warn({ key }, 'Received poll update without stored poll creation message');
+                        continue;
+                    }
+                for (const pollUpdate of update.pollUpdates) {
+                    updateMessageWithPollUpdate(pollMessage, pollUpdate);
+                }
+                storeMessage(pollMessage);
+                const pollText = formatPollForDiscord(pollMessage);
+                const channelJid = await utils.whatsapp.getChannelJid({ key });
+                if (pollText && channelJid) {
+                    state.dcClient.emit('whatsappMessage', {
+                        id: key.id,
+                        name: await utils.whatsapp.getSenderName(pollMessage),
+                        content: pollText,
+                        channelJid,
+                        profilePic: await utils.whatsapp.getProfilePic(pollMessage),
+                        isGroup: utils.whatsapp.isGroup({ key }),
+                        isForwarded: false,
+                        isEdit: true,
+                        isPoll: true,
+                        pollOptions: getPollOptions(getPollCreation(pollMessage.message)),
+                        pollSelectableCount: pollMessage?.message?.pollCreationMessage?.selectableOptionsCount
+                            || pollMessage?.message?.pollCreationMessage?.selectableCount
+                            || pollMessage?.message?.pollCreationMessageV2?.selectableOptionsCount
+                            || pollMessage?.message?.pollCreationMessageV2?.selectableCount
+                            || pollMessage?.message?.pollCreationMessageV3?.selectableOptionsCount
+                            || pollMessage?.message?.pollCreationMessageV3?.selectableCount
+                            || pollMessage?.message?.pollCreationMessageV4?.selectableOptionsCount
+                            || pollMessage?.message?.pollCreationMessageV4?.selectableCount
+                            || 1,
+                    });
+                }
+                continue;
+            }
+            if (isPinInChatMessage(update.message)) {
+                const { pinInChatMessage } = update.message;
+                const targetKey = {
+                    ...pinInChatMessage.key,
+                    remoteJid: utils.whatsapp.formatJid(pinInChatMessage.key?.remoteJid || key?.remoteJid),
+                };
+                const isPin = pinInChatMessage.type === proto.Message.PinInChatMessage.Type.PIN_FOR_ALL
+                    || pinInChatMessage.type === 1;
+                if (state.sentPins.has(targetKey.id)) {
+                    state.sentPins.delete(targetKey.id);
+                } else {
+                    state.dcClient.emit('whatsappPin', {
+                        jid: await utils.whatsapp.getChannelJid({ key }),
+                        key: targetKey,
+                        pinned: isPin,
+                        actor: await utils.whatsapp.getSenderName({ ...update, key }),
+                    });
+                }
+                continue;
+            }
             if (typeof update.status !== 'undefined' && key.fromMe &&
                 [WAMessageStatus.READ, WAMessageStatus.PLAYED].includes(update.status)) {
                 state.dcClient.emit('whatsappRead', {
@@ -393,6 +637,7 @@ const connectToWhatsApp = async (retry = 1) => {
                     state.lastMessages[message.id] = sentMessage.key.id;
                     state.lastMessages[sentMessage.key.id] = message.id;
                     state.sentMessages.add(sentMessage.key.id);
+                    storeMessage(sentMessage);
                 } catch (err) {
                     state.logger?.error(err);
                 }
@@ -439,6 +684,7 @@ const connectToWhatsApp = async (retry = 1) => {
             state.lastMessages[message.id] = sent.key.id;
             state.lastMessages[sent.key.id] = message.id;
             state.sentMessages.add(sent.key.id);
+            storeMessage(sent);
         } catch (err) {
             state.logger?.error(err);
         }
