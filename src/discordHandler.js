@@ -1830,13 +1830,21 @@ client.on('interactionCreate', async (interaction) => {
           }, 'Poll vote debug: poll message not found');
           throw new Error('Invalid poll message');
         }
+        const addressingMode = pollMessage?.key?.addressingMode;
+        const selfJids = await utils.whatsapp.hydrateJidPair(utils.whatsapp.formatJid(state.waClient?.user?.id));
+        const selfPreferred = selfJids?.[0] || utils.whatsapp.formatJid(state.waClient?.user?.id);
+        const selfFallback = selfJids?.[1];
+        const voterJidForSign = addressingMode === 'pn' && selfFallback ? selfFallback : selfPreferred;
+        const chosenRemote = addressingMode === 'pn'
+          ? utils.whatsapp.formatJid(pollMessage.key?.remoteJid || lookup.remoteJid || jid)
+          : utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt || lookup.remoteJid || jid);
         const payload = buildPollVotePayload({
           pollMessage,
           optionIndexes: [optionIndex],
-          voterJid: utils.whatsapp.formatJid(state.waClient?.user?.id),
+          voterJid: voterJidForSign,
         });
         const messageId = generateMessageIDV2(utils.whatsapp.formatJid(state.waClient?.user?.id));
-        const targetJid = utils.whatsapp.formatJid(lookup.remoteJid || jid);
+        const targetJid = chosenRemote || utils.whatsapp.formatJid(lookup.remoteJid || jid);
         state.logger?.info({
           waMessageId,
           pollJid: jid,
@@ -1844,6 +1852,10 @@ client.on('interactionCreate', async (interaction) => {
           usedRemoteJid: lookup.remoteJid,
           candidatesTried: lookup.candidates,
           payloadKeys: Object.keys(payload || {}),
+          addressingMode,
+          voterJidForSign,
+          selfPreferred,
+          selfFallback,
         }, 'Poll vote send debug');
         await state.waClient.relayMessage(targetJid, payload, { messageId });
         await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
