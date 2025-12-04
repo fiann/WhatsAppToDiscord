@@ -1861,6 +1861,11 @@ client.on('interactionCreate', async (interaction) => {
           selfFallback,
           pollCreationKey: payload?.pollUpdateMessage?.pollCreationMessageKey,
           pollMessageKey: pollMessage?.key,
+          selectedOption: optionIndex,
+          encPayloadHash: utils.crypto?.hashHex?.(payload?.pollUpdateMessage?.vote?.encPayload) || null,
+          encIvB64: payload?.pollUpdateMessage?.vote?.encIv
+            ? Buffer.from(payload.pollUpdateMessage.vote.encIv).toString('base64')
+            : null,
         }, 'Poll vote send debug');
         try {
           let sent = null;

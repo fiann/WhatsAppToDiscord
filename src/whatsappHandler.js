@@ -255,6 +255,12 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
     client.ev.emit('messages.update', [
         { key: normalizedKey, update: { pollUpdates: [update] } },
     ]);
+    state.logger?.info({
+        pollCreationKey: normalizedKey,
+        pollCreatorJid: usedCreator,
+        voterJid: usedVoter,
+        senderTimestampMs: update.senderTimestampMs,
+    }, 'Poll vote decrypted');
     return true;
 };
 
