@@ -1836,20 +1836,22 @@ client.on('interactionCreate', async (interaction) => {
         const selfFallback = selfJids?.[1];
         // For PN-addressed polls, prefer our PN (fallback) when present; otherwise use preferred (likely LID).
         const voterJidForSign = addressingMode === 'pn' && selfFallback ? selfFallback : (selfPreferred || selfFallback);
-        const chosenRemote = addressingMode === 'pn'
-          ? utils.whatsapp.formatJid(pollMessage.key?.remoteJid || lookup.remoteJid || jid)
-          : utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt || lookup.remoteJid || jid);
+        const targetCandidates = [
+          utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt),
+          utils.whatsapp.formatJid(pollMessage.key?.remoteJid),
+          utils.whatsapp.formatJid(lookup.remoteJid),
+          utils.whatsapp.formatJid(jid),
+        ].filter(Boolean);
         const payload = buildPollVotePayload({
           pollMessage,
           optionIndexes: [optionIndex],
           voterJid: voterJidForSign,
         });
         const messageId = generateMessageIDV2(utils.whatsapp.formatJid(state.waClient?.user?.id));
-        const targetJid = chosenRemote || utils.whatsapp.formatJid(lookup.remoteJid || jid);
         state.logger?.info({
           waMessageId,
           pollJid: jid,
-          targetJid,
+          targetCandidates,
           usedRemoteJid: lookup.remoteJid,
           candidatesTried: lookup.candidates,
           payloadKeys: Object.keys(payload || {}),
@@ -1860,11 +1862,34 @@ client.on('interactionCreate', async (interaction) => {
           pollCreationKey: payload?.pollUpdateMessage?.pollCreationMessageKey,
         }, 'Poll vote send debug');
         try {
-          await state.waClient.relayMessage(targetJid, payload, { messageId });
+          let sent = null;
+          let usedTarget = null;
+          let lastErr = null;
+          for (const target of targetCandidates) {
+            try {
+              sent = await state.waClient.relayMessage(target, payload, { messageId });
+              usedTarget = target;
+              break;
+            } catch (err) {
+              lastErr = err;
+              state.logger?.warn({
+                err: err?.message || err,
+                stack: err?.stack,
+                waMessageId,
+                pollJid: jid,
+                target,
+                addressingMode,
+                voterJidForSign,
+              }, 'Poll vote relay attempt failed');
+            }
+          }
+          if (!sent) {
+            throw lastErr || new Error('Failed to relay poll vote to any target');
+          }
           state.logger?.info({
             waMessageId,
             pollJid: jid,
-            targetJid,
+            targetJid: usedTarget,
             messageId,
           }, 'Poll vote sent');
           await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
@@ -1874,7 +1899,7 @@ client.on('interactionCreate', async (interaction) => {
             stack: err?.stack,
             waMessageId,
             pollJid: jid,
-            targetJid,
+            targetJid: targetCandidates,
             addressingMode,
             voterJidForSign,
             pollKey: pollMessage?.key,
