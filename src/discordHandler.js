@@ -254,21 +254,9 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
   }
 
   if (message.isPoll && Array.isArray(message.pollOptions) && message.pollOptions.length) {
-    const buttons = message.pollOptions.map((option, idx) => new MessageButton()
-      .setCustomId(`wa2dc:poll:${message.id}:${idx}`)
-      .setLabel((option || `Option ${idx + 1}`).slice(0, 80))
-      .setStyle('PRIMARY'));
-    const rows = [];
-    for (let i = 0; i < buttons.length; i += 5) {
-      rows.push(new MessageActionRow().addComponents(buttons.slice(i, i + 5)));
-    }
-    components = rows;
-    pollRegistry.set(message.id, {
-      jid: message.channelJid,
-      pollOptions: message.pollOptions,
-      selectableCount: message.pollSelectableCount || 1,
-      pollMessage: messageStore.get({ id: message.id, remoteJid: message.channelJid }),
-    });
+    const note = '\n\nPoll voting is only available on WhatsApp. Please vote from your phone.';
+    msgContent = (msgContent || message.content || 'Poll') + note;
+    components = [];
   }
 
   if (message.isEdit) {

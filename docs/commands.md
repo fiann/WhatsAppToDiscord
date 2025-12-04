@@ -27,6 +27,11 @@ Usage: `/move from:<#current-channel> to:<#new-channel> force:<true|false>`
 List all known contacts and groups, optionally filtered.  
 Usage: `/list query:<optional text>`
 
+### `/poll`
+Create a WhatsApp poll from Discord.  
+Usage: `/poll question:"text" options:"opt1,opt2,..." select:<count> announcement:<true|false>`  
+Notes: Poll messages and live vote updates are mirrored to Discord, voting can only be done directly in WhatsApp.
+
 ---
 
 ## Whitelist Controls
