@@ -1836,7 +1836,16 @@ client.on('interactionCreate', async (interaction) => {
           voterJid: utils.whatsapp.formatJid(state.waClient?.user?.id),
         });
         const messageId = generateMessageIDV2(utils.whatsapp.formatJid(state.waClient?.user?.id));
-        await state.waClient.relayMessage(jid, payload, { messageId });
+        const targetJid = utils.whatsapp.formatJid(lookup.remoteJid || jid);
+        state.logger?.info({
+          waMessageId,
+          pollJid: jid,
+          targetJid,
+          usedRemoteJid: lookup.remoteJid,
+          candidatesTried: lookup.candidates,
+          payloadKeys: Object.keys(payload || {}),
+        }, 'Poll vote send debug');
+        await state.waClient.relayMessage(targetJid, payload, { messageId });
         await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
       } catch (err) {
         const message = err?.message?.includes('Poll encryption key missing')
@@ -1846,6 +1855,7 @@ client.on('interactionCreate', async (interaction) => {
           err: err?.message || err,
           waMessageId,
           pollJid: jid,
+          stack: err?.stack,
         }, 'Failed to send poll vote to WhatsApp');
         await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
       }
