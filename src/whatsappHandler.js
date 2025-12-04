@@ -98,18 +98,32 @@ const cacheGroupMetadata = (metadata, client) => {
     }
 };
 
+const groupRefreshLastRun = new Map();
 const refreshGroupMetadata = async (client, groupId) => {
     const normalizedId = utils.whatsapp.formatJid(groupId);
     if (!normalizedId) {
         return null;
     }
+    const now = Date.now();
+    const last = groupRefreshLastRun.get(normalizedId) || 0;
+    const minGapMs = 30 * 1000;
+    if (now - last < minGapMs) {
+        return null;
+    }
+    groupRefreshLastRun.set(normalizedId, now);
     try {
         groupMetadataCache.invalidate(normalizedId);
         const metadata = await client.groupMetadata(normalizedId);
         cacheGroupMetadata(metadata, client);
         return metadata;
     } catch (err) {
-        state.logger?.warn({ err, groupId: normalizedId }, 'Failed to refresh group metadata');
+        const isRateLimit = err?.message?.includes('rate-overlimit') || err?.data === 429;
+        const level = isRateLimit ? 'debug' : 'warn';
+        state.logger?.[level]?.({ err, groupId: normalizedId }, 'Failed to refresh group metadata');
+        if (isRateLimit) {
+            // avoid thrashing: back off further for this group
+            groupRefreshLastRun.set(normalizedId, now + minGapMs);
+        }
         return null;
     }
 };

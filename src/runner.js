@@ -49,19 +49,18 @@ async function main() {
   ]));
 
   // Capture everything printed to the terminal in a separate file
-  const termLog = fs.createWriteStream('terminal.log', { flags: 'a' });
+  const termLogPath = path.resolve(process.cwd(), 'terminal.log');
+  const termLog = fs.createWriteStream(termLogPath, { flags: 'a' });
+  termLog.on('error', (err) => logger?.warn?.({ err }, 'terminal.log write error'));
+
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
   const origStderrWrite = process.stderr.write.bind(process.stderr);
-
-  process.stdout.write = (chunk, encoding, cb) => {
-    termLog.write(chunk);
-    return origStdoutWrite(chunk, encoding, cb);
+  const tee = (orig) => (chunk, encoding, cb) => {
+    termLog.write(chunk, encoding, () => {});
+    return orig(chunk, encoding, cb);
   };
-
-  process.stderr.write = (chunk, encoding, cb) => {
-    termLog.write(chunk);
-    return origStderrWrite(chunk, encoding, cb);
-  };
+  process.stdout.write = tee(origStdoutWrite);
+  process.stderr.write = tee(origStderrWrite);
 
   process.on('exit', () => {
     termLog.end();
@@ -129,8 +128,14 @@ async function main() {
     currentWorker = cluster.fork();
 
     const child = currentWorker.process;
-    if (child?.stdout) child.stdout.pipe(process.stdout);
-    if (child?.stderr) child.stderr.pipe(process.stderr);
+    if (child?.stdout) {
+      child.stdout.on('data', (chunk) => termLog.write(chunk));
+      child.stdout.pipe(process.stdout);
+    }
+    if (child?.stderr) {
+      child.stderr.on('data', (chunk) => termLog.write(chunk));
+      child.stderr.pipe(process.stderr);
+    }
 
     currentWorker.once('exit', (code, signal) => {
       currentWorker = null;

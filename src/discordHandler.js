@@ -266,6 +266,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
       jid: message.channelJid,
       pollOptions: message.pollOptions,
       selectableCount: message.pollSelectableCount || 1,
+      pollMessage: messageStore.get({ id: message.id, remoteJid: message.channelJid }),
     });
   }
 
@@ -1692,6 +1693,7 @@ const commandHandlers = {
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
         await ctx.replyPartitioned(message);
+        // update prompt already synced; avoid duplicate sends in control channel
       } else {
         await ctx.reply('No update available.');
       }
@@ -1804,10 +1806,8 @@ client.on('interactionCreate', async (interaction) => {
       const { jid, pollOptions } = pollMeta;
       const optionLabel = pollOptions?.[optionIndex] || `Option ${optionIndex + 1}`;
       try {
-        const pollMessage = messageStore.get({ id: waMessageId, remoteJid: jid });
-        if (!pollMessage) {
-          throw new Error('Poll message not found in store');
-        }
+        const pollMessage = pollMeta.pollMessage
+          || messageStore.get({ id: waMessageId, remoteJid: jid });
         const payload = buildPollVotePayload({
           pollMessage,
           optionIndexes: [optionIndex],
@@ -1816,8 +1816,11 @@ client.on('interactionCreate', async (interaction) => {
         await state.waClient.sendMessage(jid, payload);
         await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
       } catch (err) {
-        state.logger?.error({ err }, 'Failed to send poll vote to WhatsApp');
-        await interaction.reply({ content: 'Failed to send your vote to WhatsApp.', ephemeral: true }).catch(() => {});
+        const message = err?.message?.includes('Poll encryption key missing')
+          ? 'Poll is unavailable or the bot was restarted; please vote in WhatsApp.'
+          : 'Failed to send your vote to WhatsApp.';
+        state.logger?.warn({ err: err?.message || err }, 'Failed to send poll vote to WhatsApp');
+        await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
       }
       return;
     }

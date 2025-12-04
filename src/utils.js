@@ -405,11 +405,17 @@ const updater = {
     ) {
       return;
     }
-    fs.rm(`${this.currentExeName}.oldVersion`, { force: true }, () => 0);
+    const candidates = [
+      path.resolve(`${this.currentExeName}.oldVersion`),
+      path.join(path.dirname(process.execPath || ''), `${path.basename(process.execPath || this.currentExeName)}.oldVersion`),
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      fs.rm(candidate, { force: true }, () => 0);
+    }
   },
 
   async revertChanges() {
-    const currentPath = this.currentExeName;
+    const currentPath = process.execPath || path.resolve(this.currentExeName);
     const backupPath = `${currentPath}.oldVersion`;
 
     try {
@@ -577,13 +583,19 @@ const updater = {
   },
 
   async hasBackup() {
-    const backupPath = `${this.currentExeName}.oldVersion`;
-    try {
-      await fs.promises.access(backupPath, fs.constants.F_OK);
-      return true;
-    } catch (err) {
-      return false;
+    const candidates = [
+      path.resolve(`${this.currentExeName}.oldVersion`),
+      path.join(path.dirname(process.execPath || ''), `${path.basename(process.execPath || this.currentExeName)}.oldVersion`),
+    ].filter(Boolean);
+    for (const backupPath of candidates) {
+      try {
+        await fs.promises.access(backupPath, fs.constants.F_OK);
+        return true;
+      } catch {
+        /* try next */
+      }
     }
+    return false;
   },
 
   async rollback() {
