@@ -1834,7 +1834,8 @@ client.on('interactionCreate', async (interaction) => {
         const selfJids = await utils.whatsapp.hydrateJidPair(utils.whatsapp.formatJid(state.waClient?.user?.id));
         const selfPreferred = selfJids?.[0] || utils.whatsapp.formatJid(state.waClient?.user?.id);
         const selfFallback = selfJids?.[1];
-        const voterJidForSign = selfPreferred || selfFallback;
+        // For PN-addressed polls, prefer our PN (fallback) when present; otherwise use preferred (likely LID).
+        const voterJidForSign = addressingMode === 'pn' && selfFallback ? selfFallback : (selfPreferred || selfFallback);
         const chosenRemote = addressingMode === 'pn'
           ? utils.whatsapp.formatJid(pollMessage.key?.remoteJid || lookup.remoteJid || jid)
           : utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt || lookup.remoteJid || jid);
@@ -1856,6 +1857,7 @@ client.on('interactionCreate', async (interaction) => {
           voterJidForSign,
           selfPreferred,
           selfFallback,
+          pollCreationKey: payload?.pollUpdateMessage?.pollCreationMessageKey,
         }, 'Poll vote send debug');
         try {
           await state.waClient.relayMessage(targetJid, payload, { messageId });
