@@ -55,11 +55,10 @@ def test_group_refresh_scheduler_debounces_and_clears():
     scheduler.schedule('abc');
     scheduler.schedule('abc');
     scheduler.schedule('def');
-    setTimeout(() => {
-      scheduler.schedule('skip-me');
-      scheduler.clearAll();
-    }, 5);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    scheduler.schedule('skip-me');
+    scheduler.clearAll();
+    await new Promise((resolve) => setTimeout(resolve, 30));
     console.log(JSON.stringify({ calls }));
   """
     output = node_eval_es(script)

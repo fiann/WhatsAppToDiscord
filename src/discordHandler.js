@@ -9,7 +9,7 @@ import messageStore from './messageStore.js';
 import { buildPollVotePayload } from './pollUtils.js';
 import { createDiscordClient } from './clientFactories.js';
 
-const { Intents, Constants } = discordJs;
+const { Intents, Constants, MessageActionRow, MessageButton } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 const PIN_DURATION_PRESETS = {
@@ -379,6 +379,33 @@ client.on('channelDelete', async (channel) => {
     delete state.goccRuns[jid];
     state.settings.Categories = state.settings.Categories.filter((id) => channel.id !== id);
   }
+});
+
+const typingTimers = new Map();
+
+client.on('typingStart', async (typing) => {
+  const channelId = typing?.channel?.id;
+  const jid = channelId ? utils.discord.channelIdToJid(channelId) : null;
+  if (!jid || !state.waClient?.sendPresenceUpdate) return;
+
+  const sendPausedLater = () => {
+    const existing = typingTimers.get(channelId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      typingTimers.delete(channelId);
+      state.waClient.sendPresenceUpdate('paused', jid).catch(() => {});
+    }, 5000);
+    typingTimers.set(channelId, timer);
+  };
+
+  try {
+    await state.waClient.sendPresenceUpdate('composing', jid);
+  } catch {
+    /* ignore */
+  }
+  sendPausedLater();
 });
 
 client.on('whatsappMessage', async (message) => {

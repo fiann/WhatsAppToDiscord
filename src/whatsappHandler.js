@@ -115,7 +115,7 @@ const refreshGroupMetadata = async (client, groupId) => {
 };
 
 const patchGroupMetadataForCache = (client) => {
-    if (!client || client.__wa2dcGroupCachePatched) {
+    if (!client || client.__wa2dcGroupCachePatched || typeof client.groupMetadata !== 'function') {
         return;
     }
     const baseGroupMetadata = client.groupMetadata.bind(client);
@@ -128,7 +128,7 @@ const patchGroupMetadataForCache = (client) => {
 };
 
 const patchSendMessageForLinkPreviews = (client) => {
-    if (!client || client.__wa2dcLinkPreviewPatched) {
+    if (!client || client.__wa2dcLinkPreviewPatched || typeof client.sendMessage !== 'function') {
         return;
     }
     const defaultGetUrlInfo = (text) => utils.whatsapp.generateLinkPreview(text, {
@@ -202,6 +202,9 @@ const connectToWhatsApp = async (retry = 1) => {
 
     if (!groupCachePruneInterval) {
         groupCachePruneInterval = setInterval(() => groupMetadataCache.prune(), 60 * 60 * 1000);
+        if (typeof groupCachePruneInterval?.unref === 'function') {
+            groupCachePruneInterval.unref();
+        }
     }
 
     const client = createWhatsAppClient({
