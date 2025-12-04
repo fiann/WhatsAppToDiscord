@@ -231,7 +231,12 @@ const connectToWhatsApp = async (retry = 1) => {
         shouldSyncHistoryMessage: () => true,
         generateHighQualityLinkPreview: true,
         cachedGroupMetadata: async (jid) => groupMetadataCache.get(utils.whatsapp.formatJid(jid)),
-        getMessage: async (key) => messageStore.get({ ...key, remoteJid: utils.whatsapp.formatJid(key?.remoteJid) }),
+        getMessage: async (key) => {
+            const stored = messageStore.get({ ...key, remoteJid: utils.whatsapp.formatJid(key?.remoteJid) });
+            if (!stored) return null;
+            // Baileys expects proto.Message for some features (e.g., poll decryption).
+            return stored.message || stored;
+        },
         browser: ["Firefox (Linux)", "", ""]
     });
     client.contacts = state.contacts;

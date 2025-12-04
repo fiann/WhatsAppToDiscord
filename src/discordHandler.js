@@ -1895,15 +1895,16 @@ client.on('messageUpdate', async (oldMessage, message) => {
     } else {
       const stored = messageStore.get({ id: waId, remoteJid: jid });
       const key = stored?.key || { id: waId, remoteJid: jid, fromMe: stored?.key?.fromMe || false };
-      const pinPayload = { key, type: newPinned ? 1 : 0 };
-      if (newPinned) {
-        pinPayload.time = getPinDurationSeconds();
-      }
+      const pinType = newPinned ? 1 : 0;
       try {
         state.sentPins.add(key.id);
-        await state.waClient.sendMessage(jid, { pin: pinPayload });
+        await state.waClient.sendMessage(jid, {
+          pin: key,
+          type: pinType,
+          ...(pinType === 1 ? { time: getPinDurationSeconds() } : {}),
+        });
         if (newPinned) {
-          schedulePinExpiryNotice(message, pinPayload.time);
+          schedulePinExpiryNotice(message, getPinDurationSeconds());
         } else {
           clearPinExpiryNotice(message.id);
         }

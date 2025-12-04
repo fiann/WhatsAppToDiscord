@@ -21,6 +21,7 @@ const getPollEncKey = (pollMessage = {}) => {
   const contexts = [
     poll?.contextInfo?.messageSecret,
     pollMessage.message?.contextInfo?.messageSecret,
+    pollMessage.message?.messageContextInfo?.messageSecret,
     pollMessage.messageContextInfo?.messageSecret,
     poll?.encKey,
   ];

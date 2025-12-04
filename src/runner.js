@@ -41,7 +41,8 @@ async function main() {
   }
 
   const clusterExecArgv = process.pkg ? [] : ['--no-deprecation'];
-  cluster.setupPrimary({ execArgv: clusterExecArgv });
+  // `silent: true` pipes worker stdout/stderr so we can tee them into terminal.log.
+  cluster.setupPrimary({ execArgv: clusterExecArgv, silent: true });
 
   const logger = pino({}, pino.multistream([
     { stream: pino.destination('logs.txt') },
@@ -129,11 +130,9 @@ async function main() {
 
     const child = currentWorker.process;
     if (child?.stdout) {
-      child.stdout.on('data', (chunk) => termLog.write(chunk));
       child.stdout.pipe(process.stdout);
     }
     if (child?.stderr) {
-      child.stderr.on('data', (chunk) => termLog.write(chunk));
       child.stderr.pipe(process.stderr);
     }
 
