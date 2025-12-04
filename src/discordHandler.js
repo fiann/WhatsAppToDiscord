@@ -1834,7 +1834,7 @@ client.on('interactionCreate', async (interaction) => {
         const selfJids = await utils.whatsapp.hydrateJidPair(utils.whatsapp.formatJid(state.waClient?.user?.id));
         const selfPreferred = selfJids?.[0] || utils.whatsapp.formatJid(state.waClient?.user?.id);
         const selfFallback = selfJids?.[1];
-        const voterJidForSign = addressingMode === 'pn' && selfFallback ? selfFallback : selfPreferred;
+        const voterJidForSign = selfPreferred || selfFallback;
         const chosenRemote = addressingMode === 'pn'
           ? utils.whatsapp.formatJid(pollMessage.key?.remoteJid || lookup.remoteJid || jid)
           : utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt || lookup.remoteJid || jid);
@@ -1858,7 +1858,13 @@ client.on('interactionCreate', async (interaction) => {
           selfFallback,
         }, 'Poll vote send debug');
         try {
-          await state.waClient.relayMessage(targetJid, payload, { messageId });
+          const sent = await state.waClient.sendMessage(targetJid, payload, { messageId });
+          state.logger?.info({
+            waMessageId,
+            pollJid: jid,
+            targetJid,
+            messageId: sent?.key?.id,
+          }, 'Poll vote sent');
           await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
         } catch (err) {
           state.logger?.warn({
