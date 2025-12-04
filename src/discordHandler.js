@@ -1866,37 +1866,36 @@ client.on('interactionCreate', async (interaction) => {
           let sent = null;
           let usedTarget = null;
           let lastErr = null;
+          const creationKeyBase = payload?.pollUpdateMessage?.pollCreationMessageKey || {};
+          const signerCandidates = [selfPreferred, selfFallback].filter(Boolean);
           for (const target of targetCandidates) {
-            const voterForTarget = target?.endsWith('@lid')
-              ? (selfPreferred || selfFallback)
-              : (selfFallback || selfPreferred);
-            const creationKey = payload?.pollUpdateMessage?.pollCreationMessageKey || {};
-            const creationKeyForTarget = target?.endsWith('@lid') && creationKey.remoteJidAlt
-              ? { ...creationKey, remoteJid: creationKey.remoteJidAlt || creationKey.remoteJid }
-              : creationKey;
-            const payloadForTarget = {
-              pollUpdateMessage: {
-                ...payload.pollUpdateMessage,
-                pollCreationMessageKey: creationKeyForTarget,
-              },
-            };
-            try {
-              sent = await state.waClient.relayMessage(target, payloadForTarget, { messageId, statusJidList: [target] });
-              usedTarget = target;
-              break;
-            } catch (err) {
-              lastErr = err;
-              state.logger?.warn({
-                err: err?.message || err,
-                stack: err?.stack,
-                waMessageId,
-                pollJid: jid,
-                target,
-                addressingMode,
-                voterJidForSign: voterForTarget,
-                creationKeyForTarget,
-              }, 'Poll vote relay attempt failed');
+            for (const signer of signerCandidates) {
+              const creationKeyForTarget = { ...creationKeyBase, remoteJid: target };
+              const payloadForTarget = {
+                pollUpdateMessage: {
+                  ...payload.pollUpdateMessage,
+                  pollCreationMessageKey: creationKeyForTarget,
+                },
+              };
+              try {
+                sent = await state.waClient.relayMessage(target, payloadForTarget, { messageId, statusJidList: [target] });
+                usedTarget = target;
+                break;
+              } catch (err) {
+                lastErr = err;
+                state.logger?.warn({
+                  err: err?.message || err,
+                  stack: err?.stack,
+                  waMessageId,
+                  pollJid: jid,
+                  target,
+                  addressingMode,
+                  voterJidForSign: signer,
+                  creationKeyForTarget,
+                }, 'Poll vote relay attempt failed');
+              }
             }
+            if (sent) break;
           }
           if (!sent) {
             throw lastErr || new Error('Failed to relay poll vote to any target');
