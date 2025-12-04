@@ -132,7 +132,14 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
     }
 
     const meId = utils.whatsapp.formatJid(client?.user?.id);
-    const pollCreatorJid = getKeyAuthor(pollMessage.key || normalizedKey, meId);
+    const pollCreatorJid = getKeyAuthor(
+        {
+            ...pollUpdate.pollCreationMessageKey,
+            remoteJid: utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.remoteJid || pollMessage.key?.remoteJid),
+            participant: utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.participant),
+        },
+        meId
+    );
     const voterJid = getKeyAuthor(rawMessage.key, meId);
 
     const encPayload = toBuffer(pollUpdate.vote?.encPayload);
@@ -149,7 +156,7 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
             {
                 pollEncKey,
                 pollCreatorJid,
-                pollMsgId: (pollMessage.key || normalizedKey).id,
+                pollMsgId: pollUpdate.pollCreationMessageKey?.id || (pollMessage.key || normalizedKey).id,
                 voterJid,
             }
         );
