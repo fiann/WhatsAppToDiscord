@@ -131,15 +131,17 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
         return false;
     }
 
-    const meId = utils.whatsapp.formatJid(client?.user?.id);
-    const pollCreatorJid = getKeyAuthor(
-        {
-            ...pollUpdate.pollCreationMessageKey,
-            remoteJid: utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.remoteJid || pollMessage.key?.remoteJid),
-            participant: utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.participant),
-        },
-        meId
-    );
+    const meIdRaw = utils.whatsapp.formatJid(client?.user?.id);
+    const [mePrimary, meFallback] = await utils.whatsapp.hydrateJidPair(meIdRaw);
+    const meId = utils.whatsapp.formatJid(mePrimary || meFallback || meIdRaw);
+    const creationKeyForAuth = {
+        ...pollUpdate.pollCreationMessageKey,
+        remoteJid: utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.remoteJid || pollMessage.key?.remoteJid),
+        participant: utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.participant),
+    };
+    const pollCreatorJid = pollUpdate.pollCreationMessageKey?.fromMe
+        ? meId
+        : getKeyAuthor(creationKeyForAuth, meId);
     const voterJid = getKeyAuthor(rawMessage.key, meId);
 
     const encPayload = toBuffer(pollUpdate.vote?.encPayload);
