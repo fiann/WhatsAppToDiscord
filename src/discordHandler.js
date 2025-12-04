@@ -1847,6 +1847,14 @@ client.on('interactionCreate', async (interaction) => {
           optionIndexes: [optionIndex],
           voterJid: voterJidForSign,
         });
+        // Align the creation message key to the target JID when sending to LID to avoid addressing mismatch.
+        const creationKey = payload?.pollUpdateMessage?.pollCreationMessageKey || {};
+        if (targetCandidates[0]?.endsWith('@lid') && creationKey.remoteJidAlt) {
+          payload.pollUpdateMessage.pollCreationMessageKey = {
+            ...creationKey,
+            remoteJid: creationKey.remoteJidAlt || creationKey.remoteJid,
+          };
+        }
         const messageId = generateMessageIDV2(utils.whatsapp.formatJid(state.waClient?.user?.id));
         state.logger?.info({
           waMessageId,
