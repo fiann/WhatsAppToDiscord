@@ -4,6 +4,7 @@ import pino from 'pino';
 import pretty from 'pino-pretty';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
+import { promisify } from 'util';
 
 const DEFAULT_RESTART_DELAY = 10000; // ms
 const parsedRestartDelay = Number(process.env.WA2DC_RESTART_DELAY);
@@ -26,8 +27,19 @@ const overrideChildUrl = process.env.WA2DC_CHILD_PATH
   ? pathToFileURL(path.resolve(process.env.WA2DC_CHILD_PATH))
   : null;
 
+const chmodAsync = promisify(fs.chmod);
+
 async function runWorker() {
   if (overrideChildUrl) {
+    const childPath = overrideChildUrl.pathname;
+    try {
+      await chmodAsync(childPath, 0o755);
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        // Best-effort: log but continue to attempt to start anyway.
+        console.warn({ err, childPath }, 'Failed to ensure child binary is executable');
+      }
+    }
     await import(overrideChildUrl.href);
   } else {
     await import('./index.js');
