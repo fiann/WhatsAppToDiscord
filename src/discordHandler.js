@@ -1,16 +1,14 @@
 import discordJs from 'discord.js';
 import fs from 'fs';
 
-import { generateMessageIDV2 } from '@whiskeysockets/baileys/lib/Utils/generics.js';
 import state from './state.js';
 import utils from './utils.js';
 import storage from './storage.js';
 import groupMetadataCache from './groupMetadataCache.js';
 import messageStore from './messageStore.js';
-import { buildPollVotePayload } from './pollUtils.js';
 import { createDiscordClient } from './clientFactories.js';
 
-const { Intents, Constants, MessageActionRow, MessageButton } = discordJs;
+const { Intents, Constants } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 const PIN_DURATION_PRESETS = {
@@ -35,7 +33,6 @@ const BOT_PERMISSIONS = 536879120;
 const UPDATE_BUTTON_IDS = utils.discord.updateButtonIds;
 const ROLLBACK_BUTTON_ID = utils.discord.rollbackButtonId;
 const bridgePinnedMessages = new Set();
-const pollRegistry = new Map();
 const pinExpiryTimers = new Map();
 
 const getPinDurationSeconds = () => {
@@ -1783,158 +1780,6 @@ const handleInteractionCommand = async (interaction, commandName) => {
 
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isButton()) {
-    if (interaction.customId.startsWith('wa2dc:poll:')) {
-      const parts = interaction.customId.split(':');
-      const waMessageId = parts[2];
-      const optionIndex = Number(parts[3]);
-      const pollMeta = pollRegistry.get(waMessageId);
-      if (!pollMeta || Number.isNaN(optionIndex)) {
-        await interaction.reply({ content: 'Poll expired or invalid.', ephemeral: true }).catch(() => {});
-        return;
-      }
-      const { jid, pollOptions } = pollMeta;
-      const optionLabel = pollOptions?.[optionIndex] || `Option ${optionIndex + 1}`;
-      try {
-        const findPollMessage = async () => {
-          const formatted = utils.whatsapp.formatJid(jid);
-          const [primary, alternate] = await utils.whatsapp.hydrateJidPair(formatted);
-          const candidates = [...new Set([formatted, primary, alternate].filter(Boolean))];
-          for (const remote of candidates) {
-            const found = messageStore.get({ id: waMessageId, remoteJid: remote });
-            if (found) {
-              return { message: found, remoteJid: remote, candidates };
-            }
-          }
-          return { message: null, remoteJid: null, candidates };
-        };
-
-        const lookup = pollMeta.pollMessage ? { message: pollMeta.pollMessage, remoteJid: jid, candidates: [jid] } : await findPollMessage();
-        const pollMessage = lookup.message;
-        if (!pollMessage) {
-          state.logger?.warn({
-            waMessageId,
-            pollJid: jid,
-            candidatesTried: lookup.candidates,
-          }, 'Poll vote debug: poll message not found');
-          throw new Error('Invalid poll message');
-        }
-        const addressingMode = pollMessage?.key?.addressingMode;
-        const selfJids = await utils.whatsapp.hydrateJidPair(utils.whatsapp.formatJid(state.waClient?.user?.id));
-        const selfPreferred = selfJids?.[0] || utils.whatsapp.formatJid(state.waClient?.user?.id);
-        const selfFallback = selfJids?.[1];
-        // For PN-addressed polls, prefer our PN (fallback) when present; otherwise use preferred (likely LID).
-        const voterJidForSign = addressingMode === 'pn' && selfFallback ? selfFallback : (selfPreferred || selfFallback);
-        const pnFirstTargets = [
-          utils.whatsapp.formatJid(pollMessage.key?.remoteJid),
-          utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt),
-          utils.whatsapp.formatJid(lookup.remoteJid),
-          utils.whatsapp.formatJid(jid),
-        ].filter(Boolean);
-        const lidFirstTargets = [
-          utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt),
-          utils.whatsapp.formatJid(pollMessage.key?.remoteJid),
-          utils.whatsapp.formatJid(lookup.remoteJid),
-          utils.whatsapp.formatJid(jid),
-        ].filter(Boolean);
-        const targetCandidates = addressingMode === 'pn' ? pnFirstTargets : lidFirstTargets;
-        const payload = buildPollVotePayload({
-          pollMessage,
-          optionIndexes: [optionIndex],
-          voterJid: voterJidForSign,
-        });
-        const messageId = generateMessageIDV2(utils.whatsapp.formatJid(state.waClient?.user?.id));
-        state.logger?.info({
-          waMessageId,
-          pollJid: jid,
-          targetCandidates,
-          usedRemoteJid: lookup.remoteJid,
-          candidatesTried: lookup.candidates,
-          payloadKeys: Object.keys(payload || {}),
-          addressingMode,
-          voterJidForSign,
-          selfPreferred,
-          selfFallback,
-          pollCreationKey: payload?.pollUpdateMessage?.pollCreationMessageKey,
-          pollMessageKey: pollMessage?.key,
-          selectedOption: optionIndex,
-          encPayloadHash: utils.crypto?.hashHex?.(payload?.pollUpdateMessage?.vote?.encPayload) || null,
-          encIvB64: payload?.pollUpdateMessage?.vote?.encIv
-            ? Buffer.from(payload.pollUpdateMessage.vote.encIv).toString('base64')
-            : null,
-        }, 'Poll vote send debug');
-        try {
-          let sent = null;
-          let usedTarget = null;
-          let lastErr = null;
-          const creationKeyBase = payload?.pollUpdateMessage?.pollCreationMessageKey || {};
-          const signerCandidates = [selfPreferred, selfFallback].filter(Boolean);
-          for (const target of targetCandidates) {
-            for (const signer of signerCandidates) {
-              // Keep the creation key aligned with the poll creation message (usually PN for addressingMode=pn).
-              const creationKeyForTarget = { ...creationKeyBase };
-              const payloadForTarget = {
-                pollUpdateMessage: {
-                  ...payload.pollUpdateMessage,
-                  pollCreationMessageKey: creationKeyForTarget,
-                },
-              };
-              try {
-                sent = await state.waClient.relayMessage(target, payloadForTarget, { messageId, statusJidList: [target], participant: null });
-                usedTarget = target;
-                break;
-              } catch (err) {
-                lastErr = err;
-                state.logger?.warn({
-                  err: err?.message || err,
-                  stack: err?.stack,
-                  waMessageId,
-                  pollJid: jid,
-                  target,
-                  addressingMode,
-                  voterJidForSign: signer,
-                  creationKeyForTarget,
-                }, 'Poll vote relay attempt failed');
-              }
-            }
-            if (sent) break;
-          }
-          if (!sent) {
-            throw lastErr || new Error('Failed to relay poll vote to any target');
-          }
-          state.logger?.info({
-            waMessageId,
-            pollJid: jid,
-            targetJid: usedTarget,
-            messageId,
-          }, 'Poll vote sent');
-          await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
-        } catch (err) {
-          state.logger?.warn({
-            err: err?.message || err,
-            stack: err?.stack,
-            waMessageId,
-            pollJid: jid,
-            targetJid: targetCandidates,
-            addressingMode,
-            voterJidForSign,
-            pollKey: pollMessage?.key,
-          }, 'Poll vote relay failed');
-          throw err;
-        }
-      } catch (err) {
-        const message = err?.message?.includes('Poll encryption key missing')
-          ? 'Poll is unavailable or the bot was restarted; please vote in WhatsApp.'
-          : 'Failed to send your vote to WhatsApp.';
-        state.logger?.warn({
-          err: err?.message || err,
-          waMessageId,
-          pollJid: jid,
-          stack: err?.stack,
-        }, 'Failed to send poll vote to WhatsApp');
-        await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
-      }
-      return;
-    }
     if (interaction.customId === UPDATE_BUTTON_IDS.APPLY) {
       await handleInteractionCommand(interaction, 'update');
       return;
