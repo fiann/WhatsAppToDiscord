@@ -1847,14 +1847,6 @@ client.on('interactionCreate', async (interaction) => {
           optionIndexes: [optionIndex],
           voterJid: voterJidForSign,
         });
-        // Align the creation message key to the target JID when sending to LID to avoid addressing mismatch.
-        const creationKey = payload?.pollUpdateMessage?.pollCreationMessageKey || {};
-        if (targetCandidates[0]?.endsWith('@lid') && creationKey.remoteJidAlt) {
-          payload.pollUpdateMessage.pollCreationMessageKey = {
-            ...creationKey,
-            remoteJid: creationKey.remoteJidAlt || creationKey.remoteJid,
-          };
-        }
         const messageId = generateMessageIDV2(utils.whatsapp.formatJid(state.waClient?.user?.id));
         state.logger?.info({
           waMessageId,
@@ -1868,14 +1860,28 @@ client.on('interactionCreate', async (interaction) => {
           selfPreferred,
           selfFallback,
           pollCreationKey: payload?.pollUpdateMessage?.pollCreationMessageKey,
+          pollMessageKey: pollMessage?.key,
         }, 'Poll vote send debug');
         try {
           let sent = null;
           let usedTarget = null;
           let lastErr = null;
           for (const target of targetCandidates) {
+            const voterForTarget = target?.endsWith('@lid')
+              ? (selfPreferred || selfFallback)
+              : (selfFallback || selfPreferred);
+            const creationKey = payload?.pollUpdateMessage?.pollCreationMessageKey || {};
+            const creationKeyForTarget = target?.endsWith('@lid') && creationKey.remoteJidAlt
+              ? { ...creationKey, remoteJid: creationKey.remoteJidAlt || creationKey.remoteJid }
+              : creationKey;
+            const payloadForTarget = {
+              pollUpdateMessage: {
+                ...payload.pollUpdateMessage,
+                pollCreationMessageKey: creationKeyForTarget,
+              },
+            };
             try {
-              sent = await state.waClient.relayMessage(target, payload, { messageId });
+              sent = await state.waClient.relayMessage(target, payloadForTarget, { messageId, statusJidList: [target] });
               usedTarget = target;
               break;
             } catch (err) {
@@ -1887,7 +1893,8 @@ client.on('interactionCreate', async (interaction) => {
                 pollJid: jid,
                 target,
                 addressingMode,
-                voterJidForSign,
+                voterJidForSign: voterForTarget,
+                creationKeyForTarget,
               }, 'Poll vote relay attempt failed');
             }
           }
