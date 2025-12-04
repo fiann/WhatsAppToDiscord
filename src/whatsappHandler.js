@@ -7,6 +7,8 @@ import {
   WAMessageStatus,
   WAMessageStubType,
 } from '@whiskeysockets/baileys';
+import { decryptPollVote } from '@whiskeysockets/baileys/lib/Utils/process-message.js';
+import { getKeyAuthor } from '@whiskeysockets/baileys/lib/Utils/generics.js';
 
 import utils from './utils.js';
 import state from './state.js';
@@ -14,7 +16,7 @@ import { createWhatsAppClient, getBaileysVersion } from './clientFactories.js';
 import groupMetadataCache from './groupMetadataCache.js';
 import messageStore from './messageStore.js';
 import { createGroupRefreshScheduler } from './groupMetadataRefresh.js';
-import { getPollOptions } from './pollUtils.js';
+import { getPollEncKey, getPollOptions } from './pollUtils.js';
 
 
 let authState;
@@ -75,6 +77,77 @@ const formatPollForDiscord = (pollMessage) => {
 };
 
 const isPinInChatMessage = (message = {}) => !!message?.pinInChatMessage;
+
+const getStoredMessageWithJidFallback = async (key = {}) => {
+    const formattedRemote = utils.whatsapp.formatJid(key?.remoteJid);
+    const formattedAlt = utils.whatsapp.formatJid(key?.participant || key?.participantAlt || key?.remoteJidAlt);
+    const [primary, fallback] = await utils.whatsapp.hydrateJidPair(formattedRemote, formattedAlt);
+    const candidates = new Set([formattedRemote, formattedAlt, primary, fallback].filter(Boolean));
+    for (const remote of candidates) {
+        const found = messageStore.get({ ...key, remoteJid: remote });
+        if (found) {
+            if (formattedRemote && remote && formattedRemote !== remote) {
+                utils.whatsapp.migrateLegacyJid(formattedRemote, remote);
+            }
+            return found;
+        }
+    }
+    return null;
+};
+
+const handlePollUpdateMessage = async (client, rawMessage) => {
+    const pollUpdate = rawMessage?.message?.pollUpdateMessage;
+    const pollKey = pollUpdate?.pollCreationMessageKey;
+    if (!pollUpdate || !pollKey) return false;
+
+    const normalizedKey = {
+        ...pollKey,
+        remoteJid: utils.whatsapp.formatJid(pollKey.remoteJid || rawMessage.key?.remoteJid),
+        participant: utils.whatsapp.formatJid(pollKey.participant || pollKey.participantAlt),
+    };
+    const pollMessage = await getStoredMessageWithJidFallback(normalizedKey);
+    if (!pollMessage) {
+        state.logger?.warn({ key: normalizedKey }, 'Received poll vote without cached poll message');
+        return false;
+    }
+
+    const pollEncKey = getPollEncKey(pollMessage.message || pollMessage);
+    if (!pollEncKey) {
+        state.logger?.warn({ key: normalizedKey }, 'Missing poll enc key for incoming poll update');
+        return false;
+    }
+
+    const meId = utils.whatsapp.formatJid(client?.user?.id);
+    const pollCreatorJid = getKeyAuthor(normalizedKey, meId);
+    const voterJid = getKeyAuthor(rawMessage.key, meId);
+
+    let voteMsg = null;
+    try {
+        voteMsg = decryptPollVote(
+            pollUpdate.vote,
+            {
+                pollEncKey,
+                pollCreatorJid,
+                pollMsgId: normalizedKey.id,
+                voterJid,
+            }
+        );
+    } catch (err) {
+        state.logger?.warn({ err }, 'Failed to decrypt poll vote');
+        return false;
+    }
+
+    const update = {
+        pollUpdateMessageKey: rawMessage.key,
+        vote: voteMsg,
+        senderTimestampMs: Number(pollUpdate.senderTimestampMs) || Date.now(),
+    };
+
+    client.ev.emit('messages.update', [
+        { key: normalizedKey, update: { pollUpdates: [update] } },
+    ]);
+    return true;
+};
 
 const storeMessage = (message) => {
     if (!message?.key) return;
@@ -232,7 +305,7 @@ const connectToWhatsApp = async (retry = 1) => {
         generateHighQualityLinkPreview: true,
         cachedGroupMetadata: async (jid) => groupMetadataCache.get(utils.whatsapp.formatJid(jid)),
         getMessage: async (key) => {
-            const stored = messageStore.get({ ...key, remoteJid: utils.whatsapp.formatJid(key?.remoteJid) });
+            const stored = await getStoredMessageWithJidFallback({ ...key, remoteJid: utils.whatsapp.formatJid(key?.remoteJid) });
             if (!stored) return null;
             // Baileys expects proto.Message for some features (e.g., poll decryption).
             return stored.message || stored;
@@ -347,6 +420,11 @@ const connectToWhatsApp = async (retry = 1) => {
                 storeMessage(rawMessage);
                 if (!utils.whatsapp.inWhitelist(rawMessage) || !utils.whatsapp.sentAfterStart(rawMessage) || !messageType) continue;
 
+                if (messageType === 'pollUpdateMessage') {
+                    const handled = await handlePollUpdateMessage(client, rawMessage);
+                    if (handled) continue;
+                }
+
                 const channelJid = await utils.whatsapp.getChannelJid(rawMessage);
                 if (!channelJid) {
                     continue;
@@ -362,6 +440,13 @@ const connectToWhatsApp = async (retry = 1) => {
                         || pinInChatMessage.type === 1;
                     if (state.sentPins.has(targetKey.id)) {
                         state.sentPins.delete(targetKey.id);
+                        if (rawMessage.key?.id) {
+                            try {
+                                await client.sendMessage(channelJid, { delete: rawMessage.key });
+                            } catch (err) {
+                                state.logger?.debug?.({ err }, 'Failed to delete local pin notice');
+                            }
+                        }
                     } else {
                         state.dcClient.emit('whatsappPin', {
                             jid: channelJid,

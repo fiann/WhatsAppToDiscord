@@ -1,6 +1,7 @@
 import discordJs from 'discord.js';
 import fs from 'fs';
 
+import { generateMessageIDV2 } from '@whiskeysockets/baileys/lib/Utils/generics.js';
 import state from './state.js';
 import utils from './utils.js';
 import storage from './storage.js';
@@ -1813,7 +1814,8 @@ client.on('interactionCreate', async (interaction) => {
           optionIndexes: [optionIndex],
           voterJid: utils.whatsapp.formatJid(state.waClient?.user?.id),
         });
-        await state.waClient.sendMessage(jid, payload);
+        const messageId = generateMessageIDV2(utils.whatsapp.formatJid(state.waClient?.user?.id));
+        await state.waClient.relayMessage(jid, payload, { messageId });
         await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
       } catch (err) {
         const message = err?.message?.includes('Poll encryption key missing')
