@@ -92,6 +92,21 @@ const toBuffer = (val) => {
     return null;
 };
 
+const expandJidVariants = async (jid) => {
+    const variants = new Set();
+    const formatted = utils.whatsapp.formatJid(jid);
+    if (formatted) variants.add(formatted);
+    try {
+        const [primary, alternate] = await utils.whatsapp.hydrateJidPair(formatted);
+        [primary, alternate].map(utils.whatsapp.formatJid).forEach((entry) => {
+            if (entry) variants.add(entry);
+        });
+    } catch (err) {
+        state.logger?.debug?.({ err }, 'Failed to expand JID variants');
+    }
+    return Array.from(variants);
+};
+
 const getStoredMessageWithJidFallback = async (key = {}) => {
     const formattedRemote = utils.whatsapp.formatJid(key?.remoteJid);
     const formattedAlt = utils.whatsapp.formatJid(key?.participant || key?.participantAlt || key?.remoteJidAlt);
@@ -142,7 +157,14 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
     const pollCreatorJid = pollUpdate.pollCreationMessageKey?.fromMe
         ? meId
         : getKeyAuthor(creationKeyForAuth, meId);
-    const voterJid = getKeyAuthor(rawMessage.key, meId);
+    const voterPn = selectPnJid([
+        rawMessage.key?.participant,
+        rawMessage.key?.remoteJid,
+        pollUpdate.pollCreationMessageKey?.remoteJid,
+        pollMessage.key?.remoteJid,
+        pollMessage.key?.remoteJidAlt,
+    ].map(utils.whatsapp.formatJid));
+    const voterJid = voterPn || getKeyAuthor(rawMessage.key, meId);
 
     const encPayload = toBuffer(pollUpdate.vote?.encPayload);
     const encIv = toBuffer(pollUpdate.vote?.encIv);
@@ -151,30 +173,76 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
         return false;
     }
 
+    const baseCreatorCandidates = [
+        pollCreatorJid,
+        utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.participant),
+        utils.whatsapp.formatJid(pollUpdate.pollCreationMessageKey?.remoteJidAlt),
+        utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt),
+        utils.whatsapp.formatJid(pollMessage.key?.remoteJid),
+    ].filter(Boolean);
+    const baseVoterCandidates = [
+        voterJid,
+        selectPnJid([
+            rawMessage.key?.remoteJidAlt,
+            pollUpdate.pollCreationMessageKey?.remoteJidAlt,
+            pollMessage.key?.remoteJidAlt,
+        ].map(utils.whatsapp.formatJid)),
+        utils.whatsapp.formatJid(rawMessage.key?.remoteJidAlt),
+        utils.whatsapp.formatJid(rawMessage.key?.participant),
+    ].filter(Boolean);
+
+    const creatorCandidates = (await Promise.all(baseCreatorCandidates.map(expandJidVariants)))
+        .flat()
+        .filter(Boolean);
+    const voterCandidates = (await Promise.all(baseVoterCandidates.map(expandJidVariants)))
+        .flat()
+        .filter(Boolean);
+
+    let voteMsg = null;
+    let usedCreator = null;
+    let usedVoter = null;
+    const pollMsgId = pollUpdate.pollCreationMessageKey?.id || (pollMessage.key || normalizedKey).id;
+
+    for (const creator of creatorCandidates) {
+        for (const voter of voterCandidates) {
+            try {
+                voteMsg = decryptPollVote(
+                    { encPayload, encIv },
+                    {
+                        pollEncKey,
+                        pollCreatorJid: creator,
+                        pollMsgId,
+                        voterJid: voter,
+                    }
+                );
+                usedCreator = creator;
+                usedVoter = voter;
+                break;
+            } catch (err) {
+                continue;
+            }
+        }
+        if (voteMsg) break;
+    }
+
     state.logger?.info({
         key: normalizedKey,
         pollCreationKey: pollUpdate.pollCreationMessageKey,
         pollMessageKey: pollMessage?.key,
+        pollCreatorCandidates: creatorCandidates,
+        pollVoterCandidates: voterCandidates,
         pollCreatorJid,
         voterJid,
+        usedCreator,
+        usedVoter,
         encKeyLen: pollEncKey?.length,
         encPayloadLen: encPayload?.length,
         encIvLen: encIv?.length,
+        success: !!voteMsg,
     }, 'Poll vote debug');
 
-    let voteMsg = null;
-    try {
-        voteMsg = decryptPollVote(
-            { encPayload, encIv },
-            {
-                pollEncKey,
-                pollCreatorJid,
-                pollMsgId: pollUpdate.pollCreationMessageKey?.id || (pollMessage.key || normalizedKey).id,
-                voterJid,
-            }
-        );
-    } catch (err) {
-        state.logger?.warn({ err }, 'Failed to decrypt poll vote');
+    if (!voteMsg) {
+        state.logger?.warn({ pollMsgId }, 'Failed to decrypt poll vote');
         return false;
     }
 
@@ -944,3 +1012,4 @@ const actions = {
 
 export { connectToWhatsApp };
 export default actions;
+    const selectPnJid = (list = []) => list.find((jid) => typeof jid === 'string' && jid.endsWith('@s.whatsapp.net')) || null;
