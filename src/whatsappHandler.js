@@ -553,13 +553,20 @@ const connectToWhatsApp = async (retry = 1) => {
                     };
                     const isPin = pinInChatMessage.type === proto.Message.PinInChatMessage.Type.PIN_FOR_ALL
                         || pinInChatMessage.type === 1;
-                    const isSelfPin = state.sentPins.has(targetKey.id) || state.sentPins.has(rawMessage?.key?.id);
+                    const pinNoticeKey = rawMessage?.key?.id
+                        ? {
+                            ...rawMessage.key,
+                            remoteJid: utils.whatsapp.formatJid(rawMessage.key.remoteJid || channelJid),
+                            participant: utils.whatsapp.formatJid(rawMessage.key.participant || rawMessage.key.participantAlt),
+                        }
+                        : null;
+                    const isSelfPin = state.sentPins.has(targetKey.id) || (pinNoticeKey?.id && state.sentPins.has(pinNoticeKey.id));
                     if (isSelfPin) {
                         state.sentPins.delete(targetKey.id);
-                        if (rawMessage?.key?.id) state.sentPins.delete(rawMessage.key.id);
-                        if (rawMessage.key?.id) {
+                        if (pinNoticeKey?.id) state.sentPins.delete(pinNoticeKey.id);
+                        if (pinNoticeKey?.id) {
                             try {
-                                await client.sendMessage(channelJid, { delete: rawMessage.key });
+                                await client.sendMessage(pinNoticeKey.remoteJid, { delete: pinNoticeKey });
                             } catch (err) {
                                 state.logger?.debug?.({ err }, 'Failed to delete local pin notice');
                             }
@@ -701,8 +708,24 @@ const connectToWhatsApp = async (retry = 1) => {
                 };
                 const isPin = pinInChatMessage.type === proto.Message.PinInChatMessage.Type.PIN_FOR_ALL
                     || pinInChatMessage.type === 1;
-                if (state.sentPins.has(targetKey.id)) {
+                const pinNoticeKey = key?.id
+                    ? {
+                        ...key,
+                        remoteJid: utils.whatsapp.formatJid(key.remoteJid || targetKey.remoteJid),
+                        participant: utils.whatsapp.formatJid(key.participant || key.participantAlt),
+                    }
+                    : null;
+                const isSelfPin = state.sentPins.has(targetKey.id) || (pinNoticeKey?.id && state.sentPins.has(pinNoticeKey.id));
+                if (isSelfPin) {
                     state.sentPins.delete(targetKey.id);
+                    if (pinNoticeKey?.id) state.sentPins.delete(pinNoticeKey.id);
+                    if (pinNoticeKey?.id) {
+                        try {
+                            await client.sendMessage(pinNoticeKey.remoteJid, { delete: pinNoticeKey });
+                        } catch (err) {
+                            state.logger?.debug?.({ err }, 'Failed to delete local pin notice');
+                        }
+                    }
                 } else {
                     state.dcClient.emit('whatsappPin', {
                         jid: await utils.whatsapp.getChannelJid({ key }),

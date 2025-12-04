@@ -1859,8 +1859,15 @@ client.on('messageUpdate', async (oldMessage, message) => {
           type: pinType,
           ...(pinType === 1 ? { time: getPinDurationSeconds() } : {}),
         });
-        if (sentPinMsg?.key?.id) {
-          state.sentPins.add(sentPinMsg.key.id);
+        const pinNoticeKey = sentPinMsg?.key
+          ? {
+              ...sentPinMsg.key,
+              remoteJid: utils.whatsapp.formatJid(sentPinMsg.key.remoteJid || jid),
+              participant: utils.whatsapp.formatJid(sentPinMsg.key.participant || sentPinMsg.key.participantAlt),
+            }
+          : null;
+        if (pinNoticeKey?.id) {
+          state.sentPins.add(pinNoticeKey.id);
         }
         if (newPinned) {
           schedulePinExpiryNotice(message, getPinDurationSeconds());
@@ -1868,8 +1875,13 @@ client.on('messageUpdate', async (oldMessage, message) => {
           clearPinExpiryNotice(message.id);
         }
         setTimeout(() => state.sentPins.delete(key.id), 5 * 60 * 1000);
-        if (sentPinMsg?.key?.id) {
-          setTimeout(() => state.sentPins.delete(sentPinMsg.key.id), 5 * 60 * 1000);
+        if (pinNoticeKey?.id) {
+          setTimeout(() => state.sentPins.delete(pinNoticeKey.id), 5 * 60 * 1000);
+          try {
+            await state.waClient.sendMessage(pinNoticeKey.remoteJid, { delete: pinNoticeKey });
+          } catch (err) {
+            state.logger?.debug?.({ err }, 'Failed to delete local pin notice');
+          }
         }
       } catch (err) {
         state.logger?.error({ err }, 'Failed to sync Discord pin to WhatsApp');
