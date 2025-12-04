@@ -1854,17 +1854,23 @@ client.on('messageUpdate', async (oldMessage, message) => {
       const pinType = newPinned ? 1 : 0;
       try {
         state.sentPins.add(key.id);
-        await state.waClient.sendMessage(jid, {
+        const sentPinMsg = await state.waClient.sendMessage(jid, {
           pin: key,
           type: pinType,
           ...(pinType === 1 ? { time: getPinDurationSeconds() } : {}),
         });
+        if (sentPinMsg?.key?.id) {
+          state.sentPins.add(sentPinMsg.key.id);
+        }
         if (newPinned) {
           schedulePinExpiryNotice(message, getPinDurationSeconds());
         } else {
           clearPinExpiryNotice(message.id);
         }
         setTimeout(() => state.sentPins.delete(key.id), 5 * 60 * 1000);
+        if (sentPinMsg?.key?.id) {
+          setTimeout(() => state.sentPins.delete(sentPinMsg.key.id), 5 * 60 * 1000);
+        }
       } catch (err) {
         state.logger?.error({ err }, 'Failed to sync Discord pin to WhatsApp');
       }

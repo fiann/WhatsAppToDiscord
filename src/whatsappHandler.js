@@ -553,8 +553,10 @@ const connectToWhatsApp = async (retry = 1) => {
                     };
                     const isPin = pinInChatMessage.type === proto.Message.PinInChatMessage.Type.PIN_FOR_ALL
                         || pinInChatMessage.type === 1;
-                    if (state.sentPins.has(targetKey.id)) {
+                    const isSelfPin = state.sentPins.has(targetKey.id) || state.sentPins.has(rawMessage?.key?.id);
+                    if (isSelfPin) {
                         state.sentPins.delete(targetKey.id);
+                        if (rawMessage?.key?.id) state.sentPins.delete(rawMessage.key.id);
                         if (rawMessage.key?.id) {
                             try {
                                 await client.sendMessage(channelJid, { delete: rawMessage.key });
