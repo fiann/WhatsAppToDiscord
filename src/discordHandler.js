@@ -1836,12 +1836,19 @@ client.on('interactionCreate', async (interaction) => {
         const selfFallback = selfJids?.[1];
         // For PN-addressed polls, prefer our PN (fallback) when present; otherwise use preferred (likely LID).
         const voterJidForSign = addressingMode === 'pn' && selfFallback ? selfFallback : (selfPreferred || selfFallback);
-        const targetCandidates = [
+        const pnFirstTargets = [
+          utils.whatsapp.formatJid(pollMessage.key?.remoteJid),
+          utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt),
+          utils.whatsapp.formatJid(lookup.remoteJid),
+          utils.whatsapp.formatJid(jid),
+        ].filter(Boolean);
+        const lidFirstTargets = [
           utils.whatsapp.formatJid(pollMessage.key?.remoteJidAlt),
           utils.whatsapp.formatJid(pollMessage.key?.remoteJid),
           utils.whatsapp.formatJid(lookup.remoteJid),
           utils.whatsapp.formatJid(jid),
         ].filter(Boolean);
+        const targetCandidates = addressingMode === 'pn' ? pnFirstTargets : lidFirstTargets;
         const payload = buildPollVotePayload({
           pollMessage,
           optionIndexes: [optionIndex],
@@ -1875,7 +1882,8 @@ client.on('interactionCreate', async (interaction) => {
           const signerCandidates = [selfPreferred, selfFallback].filter(Boolean);
           for (const target of targetCandidates) {
             for (const signer of signerCandidates) {
-              const creationKeyForTarget = { ...creationKeyBase, remoteJid: target };
+              // Keep the creation key aligned with the poll creation message (usually PN for addressingMode=pn).
+              const creationKeyForTarget = { ...creationKeyBase };
               const payloadForTarget = {
                 pollUpdateMessage: {
                   ...payload.pollUpdateMessage,
@@ -1883,7 +1891,7 @@ client.on('interactionCreate', async (interaction) => {
                 },
               };
               try {
-                sent = await state.waClient.relayMessage(target, payloadForTarget, { messageId, statusJidList: [target] });
+                sent = await state.waClient.relayMessage(target, payloadForTarget, { messageId, statusJidList: [target], participant: null });
                 usedTarget = target;
                 break;
               } catch (err) {
