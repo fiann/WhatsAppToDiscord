@@ -78,6 +78,20 @@ const formatPollForDiscord = (pollMessage) => {
 
 const isPinInChatMessage = (message = {}) => !!message?.pinInChatMessage;
 
+const toBuffer = (val) => {
+    if (!val) return null;
+    if (Buffer.isBuffer(val)) return val;
+    if (val instanceof Uint8Array) return Buffer.from(val);
+    if (typeof val === 'string') {
+        try {
+            return Buffer.from(val, 'base64');
+        } catch {
+            return Buffer.from(val);
+        }
+    }
+    return null;
+};
+
 const getStoredMessageWithJidFallback = async (key = {}) => {
     const formattedRemote = utils.whatsapp.formatJid(key?.remoteJid);
     const formattedAlt = utils.whatsapp.formatJid(key?.participant || key?.participantAlt || key?.remoteJidAlt);
@@ -111,24 +125,31 @@ const handlePollUpdateMessage = async (client, rawMessage) => {
         return false;
     }
 
-    const pollEncKey = getPollEncKey(pollMessage.message || pollMessage);
+    const pollEncKey = toBuffer(getPollEncKey(pollMessage.message || pollMessage));
     if (!pollEncKey) {
         state.logger?.warn({ key: normalizedKey }, 'Missing poll enc key for incoming poll update');
         return false;
     }
 
     const meId = utils.whatsapp.formatJid(client?.user?.id);
-    const pollCreatorJid = getKeyAuthor(normalizedKey, meId);
+    const pollCreatorJid = getKeyAuthor(pollMessage.key || normalizedKey, meId);
     const voterJid = getKeyAuthor(rawMessage.key, meId);
+
+    const encPayload = toBuffer(pollUpdate.vote?.encPayload);
+    const encIv = toBuffer(pollUpdate.vote?.encIv);
+    if (!encPayload || !encIv) {
+        state.logger?.warn({ key: normalizedKey }, 'Missing poll vote payload bytes');
+        return false;
+    }
 
     let voteMsg = null;
     try {
         voteMsg = decryptPollVote(
-            pollUpdate.vote,
+            { encPayload, encIv },
             {
                 pollEncKey,
                 pollCreatorJid,
-                pollMsgId: normalizedKey.id,
+                pollMsgId: (pollMessage.key || normalizedKey).id,
                 voterJid,
             }
         );
