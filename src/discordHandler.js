@@ -1858,12 +1858,12 @@ client.on('interactionCreate', async (interaction) => {
           selfFallback,
         }, 'Poll vote send debug');
         try {
-          const sent = await state.waClient.sendMessage(targetJid, payload, { messageId });
+          await state.waClient.relayMessage(targetJid, payload, { messageId });
           state.logger?.info({
             waMessageId,
             pollJid: jid,
             targetJid,
-            messageId: sent?.key?.id,
+            messageId,
           }, 'Poll vote sent');
           await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
         } catch (err) {
