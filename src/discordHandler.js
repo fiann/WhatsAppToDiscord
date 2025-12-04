@@ -1857,8 +1857,22 @@ client.on('interactionCreate', async (interaction) => {
           selfPreferred,
           selfFallback,
         }, 'Poll vote send debug');
-        await state.waClient.relayMessage(targetJid, payload, { messageId });
-        await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
+        try {
+          await state.waClient.relayMessage(targetJid, payload, { messageId });
+          await interaction.reply({ content: `Voted for "${optionLabel}".`, ephemeral: true }).catch(() => {});
+        } catch (err) {
+          state.logger?.warn({
+            err: err?.message || err,
+            stack: err?.stack,
+            waMessageId,
+            pollJid: jid,
+            targetJid,
+            addressingMode,
+            voterJidForSign,
+            pollKey: pollMessage?.key,
+          }, 'Poll vote relay failed');
+          throw err;
+        }
       } catch (err) {
         const message = err?.message?.includes('Poll encryption key missing')
           ? 'Poll is unavailable or the bot was restarted; please vote in WhatsApp.'
