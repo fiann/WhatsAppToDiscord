@@ -405,11 +405,17 @@ const updater = {
     ) {
       return;
     }
-    fs.rm(`${this.currentExeName}.oldVersion`, { force: true }, () => 0);
+    const candidates = [
+      path.resolve(`${this.currentExeName}.oldVersion`),
+      path.join(path.dirname(process.execPath || ''), `${path.basename(process.execPath || this.currentExeName)}.oldVersion`),
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      fs.rm(candidate, { force: true }, () => 0);
+    }
   },
 
   async revertChanges() {
-    const currentPath = this.currentExeName;
+    const currentPath = process.execPath || path.resolve(this.currentExeName);
     const backupPath = `${currentPath}.oldVersion`;
 
     try {
@@ -577,13 +583,19 @@ const updater = {
   },
 
   async hasBackup() {
-    const backupPath = `${this.currentExeName}.oldVersion`;
-    try {
-      await fs.promises.access(backupPath, fs.constants.F_OK);
-      return true;
-    } catch (err) {
-      return false;
+    const candidates = [
+      path.resolve(`${this.currentExeName}.oldVersion`),
+      path.join(path.dirname(process.execPath || ''), `${path.basename(process.execPath || this.currentExeName)}.oldVersion`),
+    ].filter(Boolean);
+    for (const backupPath of candidates) {
+      try {
+        await fs.promises.access(backupPath, fs.constants.F_OK);
+        return true;
+      } catch {
+        /* try next */
+      }
     }
+    return false;
   },
 
   async rollback() {
@@ -1993,7 +2005,25 @@ const whatsapp = {
     return ts > state.startTime || id == null || !Object.prototype.hasOwnProperty.call(state.lastMessages, id);
   },
   getMessageType(rawMsg) {
-    return ['conversation', 'extendedTextMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'documentWithCaptionMessage', 'viewOnceMessageV2', 'stickerMessage', 'editedMessage'].find((el) => Object.hasOwn(rawMsg.message || {}, el));
+    return [
+      'conversation',
+      'extendedTextMessage',
+      'imageMessage',
+      'videoMessage',
+      'audioMessage',
+      'documentMessage',
+      'documentWithCaptionMessage',
+      'viewOnceMessageV2',
+      'stickerMessage',
+      'editedMessage',
+      'pollCreationMessage',
+      'pollCreationMessageV2',
+      'pollCreationMessageV3',
+      'pollCreationMessageV4',
+      'pollUpdateMessage',
+      'pollResultSnapshotMessage',
+      'pinInChatMessage',
+    ].find((el) => Object.hasOwn(rawMsg.message || {}, el));
   },
   _profilePicsCache: {},
   async getProfilePic(rawMsg) {
@@ -2030,6 +2060,25 @@ const whatsapp = {
       case 'documentWithCaptionMessage':
       case 'stickerMessage':
         content += msg.caption || '';
+        break;
+      case 'pollCreationMessage':
+      case 'pollCreationMessageV2':
+      case 'pollCreationMessageV3':
+      case 'pollCreationMessageV4': {
+        const options = Array.isArray(msg.options) ? msg.options : [];
+        const optionText = options.map((opt, idx) => `${idx + 1}. ${opt.optionName || 'Option'}`).join('\n');
+        const selectable = msg.selectableOptionsCount || msg.selectableCount;
+        content += `Poll: ${msg.name || 'Untitled poll'}`;
+        if (selectable && selectable > 1) {
+          content += ` (select up to ${selectable})`;
+        }
+        if (optionText) {
+          content += `\n${optionText}`;
+        }
+        break;
+      }
+      case 'pinInChatMessage':
+        content += 'Pinned a message';
         break;
     }
     const contextInfo = typeof msg === 'object' && msg !== null ? msg.contextInfo : undefined;

@@ -30,6 +30,7 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now
 - Self Hosted, so your data never leaves your computer
 - Automatically restarts itself if it crashes
 - Checks for updates every couple of days and can apply signed updates on command (packaged builds only)
+- Bridges WhatsApp polls into Discord (creation via `/poll`, live updates mirrored from WhatsApp). Voting currently must be done in WhatsApp due to API limits.
 
 **Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
 

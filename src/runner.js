@@ -4,6 +4,7 @@ import pino from 'pino';
 import pretty from 'pino-pretty';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
+import { promisify } from 'util';
 
 const DEFAULT_RESTART_DELAY = 10000; // ms
 const parsedRestartDelay = Number(process.env.WA2DC_RESTART_DELAY);
@@ -26,8 +27,19 @@ const overrideChildUrl = process.env.WA2DC_CHILD_PATH
   ? pathToFileURL(path.resolve(process.env.WA2DC_CHILD_PATH))
   : null;
 
+const chmodAsync = promisify(fs.chmod);
+
 async function runWorker() {
   if (overrideChildUrl) {
+    const childPath = overrideChildUrl.pathname;
+    try {
+      await chmodAsync(childPath, 0o755);
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        // Best-effort: log but continue to attempt to start anyway.
+        console.warn({ err, childPath }, 'Failed to ensure child binary is executable');
+      }
+    }
     await import(overrideChildUrl.href);
   } else {
     await import('./index.js');
@@ -41,7 +53,8 @@ async function main() {
   }
 
   const clusterExecArgv = process.pkg ? [] : ['--no-deprecation'];
-  cluster.setupPrimary({ execArgv: clusterExecArgv });
+  // `silent: true` pipes worker stdout/stderr so we can tee them into terminal.log.
+  cluster.setupPrimary({ execArgv: clusterExecArgv, silent: true });
 
   const logger = pino({}, pino.multistream([
     { stream: pino.destination('logs.txt') },
@@ -49,19 +62,18 @@ async function main() {
   ]));
 
   // Capture everything printed to the terminal in a separate file
-  const termLog = fs.createWriteStream('terminal.log', { flags: 'a' });
+  const termLogPath = path.resolve(process.cwd(), 'terminal.log');
+  const termLog = fs.createWriteStream(termLogPath, { flags: 'a' });
+  termLog.on('error', (err) => logger?.warn?.({ err }, 'terminal.log write error'));
+
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
   const origStderrWrite = process.stderr.write.bind(process.stderr);
-
-  process.stdout.write = (chunk, encoding, cb) => {
-    termLog.write(chunk);
-    return origStdoutWrite(chunk, encoding, cb);
+  const tee = (orig) => (chunk, encoding, cb) => {
+    termLog.write(chunk, encoding, () => {});
+    return orig(chunk, encoding, cb);
   };
-
-  process.stderr.write = (chunk, encoding, cb) => {
-    termLog.write(chunk);
-    return origStderrWrite(chunk, encoding, cb);
-  };
+  process.stdout.write = tee(origStdoutWrite);
+  process.stderr.write = tee(origStderrWrite);
 
   process.on('exit', () => {
     termLog.end();
@@ -129,8 +141,12 @@ async function main() {
     currentWorker = cluster.fork();
 
     const child = currentWorker.process;
-    if (child?.stdout) child.stdout.pipe(process.stdout);
-    if (child?.stderr) child.stderr.pipe(process.stderr);
+    if (child?.stdout) {
+      child.stdout.pipe(process.stdout);
+    }
+    if (child?.stderr) {
+      child.stderr.pipe(process.stderr);
+    }
 
     currentWorker.once('exit', (code, signal) => {
       currentWorker = null;

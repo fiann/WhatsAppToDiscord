@@ -4,11 +4,18 @@ import fs from 'fs';
 import state from './state.js';
 import utils from './utils.js';
 import storage from './storage.js';
+import groupMetadataCache from './groupMetadataCache.js';
+import messageStore from './messageStore.js';
 import { createDiscordClient } from './clientFactories.js';
 
 const { Intents, Constants } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
+const PIN_DURATION_PRESETS = {
+  '24h': 24 * 60 * 60,
+  '7d': 7 * 24 * 60 * 60,
+  '30d': 30 * 24 * 60 * 60,
+};
 
 const client = createDiscordClient({
   intents: [
@@ -25,6 +32,55 @@ const deliveredMessages = new Set();
 const BOT_PERMISSIONS = 536879120;
 const UPDATE_BUTTON_IDS = utils.discord.updateButtonIds;
 const ROLLBACK_BUTTON_ID = utils.discord.rollbackButtonId;
+const bridgePinnedMessages = new Set();
+const pinExpiryTimers = new Map();
+
+const getPinDurationSeconds = () => {
+  const configured = Number(state.settings.PinDurationSeconds);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return PIN_DURATION_PRESETS['7d'];
+};
+
+const schedulePinExpiryNotice = (message, durationSeconds) => {
+  const durationMs = durationSeconds * 1000;
+  if (!message || durationMs <= 0) {
+    return;
+  }
+  const existing = pinExpiryTimers.get(message.id);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  const timer = setTimeout(async () => {
+    pinExpiryTimers.delete(message.id);
+    let target = message;
+    try {
+      target = await message.fetch();
+    } catch {
+      /* best-effort */
+    }
+    if (!target?.pinned) return;
+    bridgePinnedMessages.add(target.id);
+    try {
+      await target.unpin();
+    } catch {
+      /* ignore */
+    } finally {
+      bridgePinnedMessages.delete(target.id);
+    }
+    await target.channel?.send(`Pin expired after ${Math.round(durationSeconds / 86400)} day${durationSeconds === 86400 ? '' : 's'}.`).catch(() => {});
+  }, durationMs);
+  pinExpiryTimers.set(message.id, timer);
+};
+
+const clearPinExpiryNotice = (messageId) => {
+  const timer = pinExpiryTimers.get(messageId);
+  if (timer) {
+    clearTimeout(timer);
+    pinExpiryTimers.delete(messageId);
+  }
+};
 
 class CommandResponder {
   constructor({ interaction, channel }) {
@@ -129,6 +185,7 @@ class CommandContext {
 const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) => {
   let msgContent = '';
   const files = [];
+  let components = [];
   const webhook = await utils.discord.getOrCreateChannel(message.channelJid);
   const avatarURL = message.profilePic || DEFAULT_AVATAR_URL;
   const content = utils.discord.convertWhatsappFormatting(message.content);
@@ -193,11 +250,17 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
     msgContent = normalization.text;
   }
 
+  if (message.isPoll && Array.isArray(message.pollOptions) && message.pollOptions.length) {
+    const note = '\n\nPoll voting is only available on WhatsApp. Please vote from your phone.';
+    msgContent = (msgContent || message.content || 'Poll') + note;
+    components = [];
+  }
+
   if (message.isEdit) {
     const dcMessageId = state.lastMessages[message.id];
     if (dcMessageId) {
       try {
-        await utils.discord.safeWebhookEdit(webhook, dcMessageId, { content: msgContent || null }, message.channelJid);
+        await utils.discord.safeWebhookEdit(webhook, dcMessageId, { content: msgContent || null, components }, message.channelJid);
         return;
       } catch (err) {
         state.logger?.error(err);
@@ -208,6 +271,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
       content: msgContent,
       username: message.name,
       avatarURL,
+      components,
     }, message.channelJid);
     if (message.id != null) {
       // bidirectional map automatically stores both directions
@@ -224,6 +288,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
         content: msgContent.shift(),
         username: message.name,
         avatarURL,
+        components,
       }, message.channelJid);
     }
 
@@ -248,6 +313,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
         username: message.name,
         files: fileChunks[i],
         avatarURL,
+        components,
       };
       lastDcMessage = await utils.discord.safeWebhookSend(webhook, sendArgs, message.channelJid);
 
@@ -300,6 +366,33 @@ client.on('channelDelete', async (channel) => {
     delete state.goccRuns[jid];
     state.settings.Categories = state.settings.Categories.filter((id) => channel.id !== id);
   }
+});
+
+const typingTimers = new Map();
+
+client.on('typingStart', async (typing) => {
+  const channelId = typing?.channel?.id;
+  const jid = channelId ? utils.discord.channelIdToJid(channelId) : null;
+  if (!jid || !state.waClient?.sendPresenceUpdate) return;
+
+  const sendPausedLater = () => {
+    const existing = typingTimers.get(channelId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      typingTimers.delete(channelId);
+      state.waClient.sendPresenceUpdate('paused', jid).catch(() => {});
+    }, 5000);
+    typingTimers.set(channelId, timer);
+  };
+
+  try {
+    await state.waClient.sendPresenceUpdate('composing', jid);
+  } catch {
+    /* ignore */
+  }
+  sendPausedLater();
 });
 
 client.on('whatsappMessage', async (message) => {
@@ -486,6 +579,36 @@ client.on('whatsappCall', async ({ call, jid }) => {
   }
 });
 
+client.on('whatsappPin', async ({ jid, key, pinned }) => {
+  if ((state.settings.oneWay >> 0 & 1) === 0) {
+    return;
+  }
+  const channelId = state.chats[jid]?.channelId;
+  const dcMessageId = state.lastMessages[key.id];
+  if (!channelId || !dcMessageId) {
+    return;
+  }
+  const channel = await utils.discord.getChannel(channelId);
+  const message = await channel.messages.fetch(dcMessageId).catch(() => null);
+  if (!message) {
+    return;
+  }
+  bridgePinnedMessages.add(message.id);
+  try {
+    if (pinned) {
+      await message.pin();
+      schedulePinExpiryNotice(message, getPinDurationSeconds());
+    } else {
+      await message.unpin();
+      clearPinExpiryNotice(message.id);
+    }
+  } catch (err) {
+    state.logger?.warn({ err }, 'Failed to sync WhatsApp pin to Discord');
+  } finally {
+    setTimeout(() => bridgePinnedMessages.delete(message.id), 5000);
+  }
+});
+
 const { ApplicationCommandOptionTypes } = Constants;
 
 const commandHandlers = {
@@ -554,6 +677,100 @@ const commandHandlers = {
 
       const channelMention = webhook.channelId ? `<#${webhook.channelId}>` : 'the linked channel';
       await ctx.reply(`Started a conversation in ${channelMention}.`);
+    },
+  },
+  poll: {
+    description: 'Create a WhatsApp poll in this channel.',
+    options: [
+      {
+        name: 'question',
+        description: 'Poll question/title.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+      {
+        name: 'options',
+        description: 'Comma-separated options (min 2).',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+      {
+        name: 'select',
+        description: 'How many options can be selected.',
+        type: ApplicationCommandOptionTypes.INTEGER,
+        required: false,
+      },
+      {
+        name: 'announcement',
+        description: 'Send as an announcement-group poll.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: false,
+      },
+    ],
+    async execute(ctx) {
+      const jid = utils.discord.channelIdToJid(ctx.channel?.id);
+      if (!jid) {
+        await ctx.reply('This command only works in channels linked to WhatsApp chats.');
+        return;
+      }
+      const question = ctx.getStringOption('question')?.trim();
+      const rawOptions = ctx.getStringOption('options') || '';
+      const values = rawOptions.split(',').map((opt) => opt.trim()).filter(Boolean);
+      if (!question) {
+        await ctx.reply('Please provide a poll question.');
+        return;
+      }
+      if (values.length < 2) {
+        await ctx.reply('Please provide at least two poll options (comma-separated).');
+        return;
+      }
+      const selectableCount = ctx.getIntegerOption('select') || 1;
+      if (selectableCount < 1 || selectableCount > values.length) {
+        await ctx.reply('Selectable count must be at least 1 and no more than the number of options.');
+        return;
+      }
+      const toAnnouncementGroup = Boolean(ctx.getBooleanOption('announcement'));
+      try {
+        const sent = await state.waClient.sendMessage(jid, {
+          poll: {
+            name: question,
+            values,
+            selectableCount,
+            toAnnouncementGroup,
+          },
+        });
+        messageStore.set(sent);
+        await ctx.reply('Poll sent to WhatsApp!');
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to send poll to WhatsApp');
+        await ctx.reply('Failed to send the poll to WhatsApp. Please try again.');
+      }
+    },
+  },
+  setpinduration: {
+    description: 'Set the default pin duration for WhatsApp pins.',
+    options: [
+      {
+        name: 'duration',
+        description: 'How long pins last by default.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+        choices: [
+          { name: '24 hours', value: '24h' },
+          { name: '7 days', value: '7d' },
+          { name: '30 days', value: '30d' },
+        ],
+      },
+    ],
+    async execute(ctx) {
+      const choice = ctx.getStringOption('duration');
+      const seconds = PIN_DURATION_PRESETS[choice];
+      if (!seconds) {
+        await ctx.reply('Invalid duration. Choose 24h, 7d, or 30d.');
+        return;
+      }
+      state.settings.PinDurationSeconds = seconds;
+      await ctx.reply(`Default pin duration set to ${choice}.`);
     },
   },
   link: {
@@ -1072,7 +1289,11 @@ const commandHandlers = {
         'app-state-sync-version': { critical_unblock_low: null },
       });
       await state.waClient.resyncAppState(['critical_unblock_low']);
-      for (const [jid, attributes] of Object.entries(await state.waClient.groupFetchAllParticipating())) { state.waClient.contacts[jid] = attributes.subject; }
+      const participatingGroups = await state.waClient.groupFetchAllParticipating();
+      groupMetadataCache.prime(participatingGroups);
+      for (const [jid, attributes] of Object.entries(participatingGroups)) {
+        state.waClient.contacts[jid] = attributes.subject;
+      }
       const shouldRename = Boolean(ctx.getBooleanOption('rename'));
       if (shouldRename) {
         try {
@@ -1458,6 +1679,7 @@ const commandHandlers = {
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
         await ctx.replyPartitioned(message);
+        // update prompt already synced; avoid duplicate sends in control channel
       } else {
         await ctx.reply('No update available.');
       }
@@ -1599,10 +1821,8 @@ client.on('messageCreate', async (message) => {
   state.waClient.ev.emit('discordMessage', { jid, message });
 });
 
-client.on('messageUpdate', async (_, message) => {
-  if (message.webhookId != null) {
-    return;
-  }
+client.on('messageUpdate', async (oldMessage, message) => {
+  const isWebhookMessage = message.webhookId != null;
 
   if (message.partial) {
     try {
@@ -1613,12 +1833,63 @@ client.on('messageUpdate', async (_, message) => {
     }
   }
 
-  if (message.editedTimestamp == null) {
+  const jid = utils.discord.channelIdToJid(message.channelId);
+  if (jid == null) {
     return;
   }
 
-  const jid = utils.discord.channelIdToJid(message.channelId);
-  if (jid == null) {
+  const oldPinned = typeof oldMessage?.pinned === 'boolean' ? oldMessage.pinned : undefined;
+  const newPinned = Boolean(message.pinned);
+  const pinChanged = typeof oldPinned === 'boolean' ? oldPinned !== newPinned : newPinned === true;
+
+  if (pinChanged) {
+    const waId = state.lastMessages[message.id];
+    if (waId == null) {
+      await message.channel.send(`Couldn't ${newPinned ? 'pin' : 'unpin'} on WhatsApp. You can only pin messages synced with WhatsApp.`);
+    } else if (bridgePinnedMessages.has(message.id)) {
+      bridgePinnedMessages.delete(message.id);
+    } else {
+      const stored = messageStore.get({ id: waId, remoteJid: jid });
+      const key = stored?.key || { id: waId, remoteJid: jid, fromMe: stored?.key?.fromMe || false };
+      const pinType = newPinned ? 1 : 0;
+      try {
+        state.sentPins.add(key.id);
+        const sentPinMsg = await state.waClient.sendMessage(jid, {
+          pin: key,
+          type: pinType,
+          ...(pinType === 1 ? { time: getPinDurationSeconds() } : {}),
+        });
+        const pinNoticeKey = sentPinMsg?.key
+          ? {
+              ...sentPinMsg.key,
+              remoteJid: utils.whatsapp.formatJid(sentPinMsg.key.remoteJid || jid),
+              participant: utils.whatsapp.formatJid(sentPinMsg.key.participant || sentPinMsg.key.participantAlt),
+            }
+          : null;
+        if (pinNoticeKey?.id) {
+          state.sentPins.add(pinNoticeKey.id);
+        }
+        if (newPinned) {
+          schedulePinExpiryNotice(message, getPinDurationSeconds());
+        } else {
+          clearPinExpiryNotice(message.id);
+        }
+        setTimeout(() => state.sentPins.delete(key.id), 5 * 60 * 1000);
+        if (pinNoticeKey?.id) {
+          setTimeout(() => state.sentPins.delete(pinNoticeKey.id), 5 * 60 * 1000);
+          try {
+            await state.waClient.sendMessage(pinNoticeKey.remoteJid, { delete: pinNoticeKey });
+          } catch (err) {
+            state.logger?.debug?.({ err }, 'Failed to delete local pin notice');
+          }
+        }
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to sync Discord pin to WhatsApp');
+      }
+    }
+  }
+
+  if (message.editedTimestamp == null || isWebhookMessage) {
     return;
   }
 
@@ -1628,7 +1899,7 @@ client.on('messageUpdate', async (_, message) => {
     return;
   }
 
-  if (message.content.trim() === '') {
+  if ((message.content || '').trim() === '') {
     await message.channel.send('Edited message has no text to send to WhatsApp.');
     return;
   }
@@ -1671,6 +1942,7 @@ client.on('messageDelete', async (message) => {
     delete state.lastMessages[waId];
   }
   delete state.lastMessages[message.id];
+  clearPinExpiryNotice(message.id);
 });
 
 client.on('messageReactionAdd', async (reaction, user) => {
