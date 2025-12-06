@@ -8,7 +8,7 @@ import groupMetadataCache from './groupMetadataCache.js';
 import messageStore from './messageStore.js';
 import { createDiscordClient } from './clientFactories.js';
 
-const { Intents, Constants } = discordJs;
+const { Intents, Constants, MessageActionRow, MessageButton } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 const PIN_DURATION_PRESETS = {
@@ -1678,8 +1678,20 @@ const commandHandlers = {
       await utils.discord.syncRollbackPrompt();
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
-        await ctx.replyPartitioned(message);
-        // update prompt already synced; avoid duplicate sends in control channel
+        const components = [
+          new MessageActionRow().addComponents(
+            new MessageButton()
+              .setCustomId(UPDATE_BUTTON_IDS.APPLY)
+              .setLabel('Update')
+              .setStyle('PRIMARY')
+              .setDisabled(!state.updateInfo.canSelfUpdate),
+            new MessageButton()
+              .setCustomId(UPDATE_BUTTON_IDS.SKIP)
+              .setLabel('Skip update')
+              .setStyle('SECONDARY'),
+          ),
+        ];
+        await ctx.reply({ content: message, components });
       } else {
         await ctx.reply('No update available.');
       }

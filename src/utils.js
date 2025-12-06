@@ -1749,6 +1749,9 @@ const whatsapp = {
     }
     return flat.find(Boolean) || null;
   },
+  async generateLinkPreview(text, { uploadImage, logger } = {}) {
+    return discord.generateLinkPreview(text, { uploadImage, logger });
+  },
   getChatJidCandidates(rawMsg = {}) {
     const { key = {} } = rawMsg;
     const remoteJid = this.formatJid(
