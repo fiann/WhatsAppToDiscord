@@ -44,10 +44,18 @@ const UPDATE_BUTTON_IDS = {
   SKIP: 'wa2dc:skip-update',
 };
 const ROLLBACK_BUTTON_ID = 'wa2dc:rollback';
-const getLinkPreviewFn = typeof linkPreview === 'function'
-  ? linkPreview
-  : linkPreview?.getLinkPreview
-    || (typeof linkPreview?.default === 'function' ? linkPreview.default : null);
+const resolveLinkPreviewFn = () => {
+  const candidates = [
+    linkPreview,
+    linkPreview?.getLinkPreview,
+    linkPreview?.default,
+    linkPreview?.default?.getLinkPreview,
+    linkPreview?.['module.exports'],
+    linkPreview?.['module.exports']?.getLinkPreview,
+  ];
+  return candidates.find((candidate) => typeof candidate === 'function') || null;
+};
+const getLinkPreviewFn = resolveLinkPreviewFn();
 
 const sanitizeFileName = (name = '', fallback = 'file') => {
   const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
