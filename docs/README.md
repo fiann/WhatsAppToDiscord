@@ -17,6 +17,7 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by 
 - Translates mentions between WhatsApp and Discord
 - Allows usage of WhatsApp through the Discord overlay
 - Syncs message edits between WhatsApp and Discord
+- Bridges WhatsApp polls into Discord (creation and live updates; voting stays in WhatsApp due to API limits)
 - Uses minimal resources because it doesn't simulate a browser
 - Open Source, you can see, modify and run your own version of the bot!
 - Self Hosted, so your data never leaves your computer
@@ -25,12 +26,19 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by 
 
 **Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
 
-## Baileys 7 migration notes
+## Baileys 7 migration
 
-This repository tracks Baileys `7.0.0-rc.9`. Upstream outlines every breaking change in their migration article: [https://whiskey.so/migrate-latest](https://whiskey.so/migrate-latest). The bridge automatically adapts to the important pieces:
+This repository tracks Baileys `7.0.0-rc.9`. Upstream outlines every breaking change in their migration article: [https://whiskey.so/migrate-latest](https://whiskey.so/migrate-latest). Notes and common workarounds:
+
+**Notes**
 
 - Local Identifiers (LIDs) are now preferred over PN-based JIDs. The bot listens for `lid-mapping.update` events, migrates stored chats/whitelists as WhatsApp reveals PN↔LID pairs, and always talks to the chat using the identifier WhatsApp considers canonical.
 - The Signal auth store seeds the newly required `lid-mapping`, `tctoken`, `device-list`, and `device-index` namespaces so rc.9 can write those blobs without crashing.
+
+**Common issues & workarounds**
+
+- **Duplicate Discord channels after the LID migration** – If a conversation suddenly starts flowing into a brand-new Discord channel, re-link it back to the original room via the control channel (`link --force <contact> #old-channel`) rather than editing files on disk. The bot will create a webhook inside the existing channel, clean up the stray webhook, and update its saved metadata. If you prefer to move the webhook that already exists in the duplicate channel, run `move #duplicate-channel #old-channel --force` so the bot reuses that webhook and deletes the redundant channel mapping for you.
+- **Repeated "Connection was lost" logs** – WhatsApp occasionally drops the socket with timeout errors. The bot now keeps retrying with exponential backoff instead of deleting the session, so expect control-channel status messages while it reconnects. If the retries never succeed, rescan the QR code to refresh the session.
 
 ## Running
 
@@ -62,11 +70,7 @@ This keeps you in control of when updates are applied instead of auto-updating.
 - Switch channels from the control channel with `updateChannel stable|unstable`.
 - Packaged installs keep the previous binary so you can run `rollback` from the control channel if a release breaks.
 - Docker and source installs only notify you. Review the changelog and pull a new image when you are ready.
-
-## Troubleshooting
-
-- **Duplicate Discord channels after the LID migration** – If a conversation suddenly starts flowing into a brand-new Discord channel, re-link it back to the original room via the control channel (`link --force <contact> #old-channel`) rather than editing files on disk. The bot will create a webhook inside the existing channel, clean up the stray webhook, and update its saved metadata. If you prefer to move the webhook that already exists in the duplicate channel, run `move #duplicate-channel #old-channel --force` so the bot reuses that webhook and deletes the redundant channel mapping for you.
-- **Repeated "Connection was lost" logs** – WhatsApp occasionally drops the socket with timeout errors. The bot now keeps retrying with exponential backoff instead of deleting the session, so expect control-channel status messages while it reconnects. If the retries never succeed, rescan the QR code to refresh the session.
+- Pinning a specific version tag makes rollbacks easier on Docker.
 
 ## Setup
 

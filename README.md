@@ -1,104 +1,30 @@
 # WhatsApp To Discord
 
-[![Latest release](https://img.shields.io/github/v/release/arespawn/WhatsAppToDiscord?display_name=tag&sort=semver&logo=github)](https://github.com/arespawn/WhatsAppToDiscord/releases/latest)
-[![Total downloads](https://img.shields.io/github/downloads/arespawn/WhatsAppToDiscord/total?logo=github)](https://github.com/arespawn/WhatsAppToDiscord/releases)
-[![License](https://img.shields.io/github/license/arespawn/WhatsAppToDiscord)](LICENSE.txt)
-[![Tests](https://img.shields.io/github/actions/workflow/status/arespawn/WhatsAppToDiscord/ci-tests.yml?label=tests&logo=github)](https://github.com/arespawn/WhatsAppToDiscord/actions/workflows/ci-tests.yml)
-[![Lint](https://img.shields.io/github/actions/workflow/status/arespawn/WhatsAppToDiscord/lint.yml?label=lint&logo=eslint&logoColor=white)](https://github.com/arespawn/WhatsAppToDiscord/actions/workflows/lint.yml)
-[![Docker images](https://img.shields.io/github/actions/workflow/status/arespawn/WhatsAppToDiscord/docker-publish.yml?label=docker&logo=docker)](https://github.com/arespawn/WhatsAppToDiscord/actions/workflows/docker-publish.yml)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?logo=github)](https://github.com/arespawn/WhatsAppToDiscord/pulls)
+[![Latest release](https://img.shields.io/github/v/release/arespawn/WhatsAppToDiscord?display_name=tag&sort=semver&logo=github)](https://github.com/arespawn/WhatsAppToDiscord/releases/latest) [![Total downloads](https://img.shields.io/github/downloads/arespawn/WhatsAppToDiscord/total?logo=github)](https://github.com/arespawn/WhatsAppToDiscord/releases) [![License](https://img.shields.io/github/license/arespawn/WhatsAppToDiscord)](LICENSE.txt) [![Tests](https://img.shields.io/github/actions/workflow/status/arespawn/WhatsAppToDiscord/ci-tests.yml?label=tests&logo=github)](https://github.com/arespawn/WhatsAppToDiscord/actions/workflows/ci-tests.yml) [![Lint](https://img.shields.io/github/actions/workflow/status/arespawn/WhatsAppToDiscord/lint.yml?label=lint&logo=eslint&logoColor=white)](https://github.com/arespawn/WhatsAppToDiscord/actions/workflows/lint.yml) [![Docker images](https://img.shields.io/github/actions/workflow/status/arespawn/WhatsAppToDiscord/docker-publish.yml?label=docker&logo=docker)](https://github.com/arespawn/WhatsAppToDiscord/actions/workflows/docker-publish.yml) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?logo=github)](https://github.com/arespawn/WhatsAppToDiscord/pulls)
 
-WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Discord and WhatsApp. It is built on top of [discord.js](https://github.com/discordjs/discord.js) and [Baileys](https://github.com/WhiskeySockets/Baileys) libraries.
+WhatsAppToDiscord (WA2DC) is a self-hosted bridge that mirrors WhatsApp chats into Discord using WhatsApp Web (via [Baileys](https://github.com/WhiskeySockets/Baileys)) and a Discord bot (via [discord.js](https://github.com/discordjs/discord.js)).
 
 Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now maintained by [arespawn](https://github.com/arespawn) with the blessing of the previous author.
 
-> ✅ **Stable release notice:** Version `v2.0.0` ships the Baileys 7 migration as the first stable build after the prerelease cycle.
+> The documentation website is the best place to start (setup, commands, configuration, troubleshooting): https://arespawn.github.io/WhatsAppToDiscord/
 
 ## Requirements
 
-- Node.js 20 or higher
+- Node.js 20 or higher (or Docker)
 
-## Features
+## Highlights
 
-- Supports media (Image, Video, Audio, Document, Stickers) and reactions!
-- Allows whitelisting, so you can choose what to see on Discord
-- Translates mentions between WhatsApp and Discord
-- Allows usage of WhatsApp through the Discord overlay
-- Syncs message edits between WhatsApp and Discord
-- Uses minimal resources because it doesn't simulate a browser
-- Open Source, you can see, modify and run your own version of the bot!
-- Self Hosted, so your data never leaves your computer
-- Automatically restarts itself if it crashes
-- Checks for updates every couple of days and can apply signed updates on command (packaged builds only)
-- Bridges WhatsApp polls into Discord (creation via `/poll`, live updates mirrored from WhatsApp). Voting currently must be done in WhatsApp due to API limits.
+- Mirrors messages, media, reactions, and edits between WhatsApp and Discord
+- Lets you whitelist which chats appear in Discord
+- Bridges WhatsApp polls into Discord (creation and live updates; voting stays in WhatsApp due to API limits)
+- Self-hosted: runs on your own machine/server
 
-**Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
+## Disclaimer
 
-## Baileys 7 migration notes
+This project is not affiliated, associated, authorized, endorsed by, or in any way officially connected with WhatsApp or any of its subsidiaries or its affiliates. The official WhatsApp website can be found at whatsapp.com. "WhatsApp" as well as related names, marks, emblems and images are registered trademarks of their respective owners.
 
-We bundle Baileys `7.0.0-rc.9`, which ships multiple breaking changes. Read the upstream migration guide at [https://whiskey.so/migrate-latest](https://whiskey.so/migrate-latest) for the full context. Highlights for this project:
+The maintainers do not in any way condone the use of this application in practices that violate the Terms of Service of WhatsApp. The maintainers of this application call upon the personal responsibility of its users to use this application in a fair way, as it is intended to be used. Use at your own discretion. Do not spam people with this. We discourage any stalkerware, bulk or automated messaging usage.
 
-- WhatsApp now prefers Local Identifiers (LIDs) over phone-number JIDs. The bot keeps your Discord mappings, whitelist, and cached contacts synchronized with whichever identifier WhatsApp reports by subscribing to the new `lid-mapping.update` feed and retrofitting any PN-only entries.
-- Signal auth stores must expose the `lid-mapping`, `tctoken`, `device-list`, and `device-index` buckets. The included storage helpers pre-create those files so rc.9 can sync keys safely.
+## License
 
-## Running
-
-Run the bot with `npm start` or use the executable downloaded from the releases
-page. Both methods use a small helper script that watches the process and
-restarts it automatically if it exits unexpectedly. Directly running `node
-src/index.js` skips this helper and the bot won't restart on crashes.
-
-Runtime logs are written to `logs.txt`. Everything printed to the terminal is
-also saved to `terminal.log`, which can help diagnose issues when running on a
-headless server.
-
-Alternatively, you can run the bot using Docker. Copy `.env.example` to `.env`,
-put your Discord bot token in it and execute:
-
-```bash
-docker compose up -d
-```
-
-The compose file mounts the `storage` directory so data is kept between
-container restarts. It uses the `stable` tag by default; switch to `unstable`
-if you explicitly want prerelease builds.
-
-To update a running container, pull the new image and recreate the service:
-
-```bash
-docker compose pull wa2dc && docker compose up -d wa2dc
-```
-
-This keeps you in control of when updates are applied instead of auto-updating.
-
-## Troubleshooting
-
-- **Duplicate Discord channels after the LID migration** – If a chat suddenly starts posting to a brand-new Discord channel, re-link it back to the original room from the control channel instead of editing `storage/chats.json` by hand. Run `link --force <contact> #old-channel` (or `start <jid> #old-channel` for a brand-new contact) and the bot will recreate its webhook inside the existing Discord channel, delete the stray webhook, and update the saved chat metadata. If you just want to repoint the webhook that already lives inside the duplicate channel, run `move #duplicate-channel #old-channel --force` to move the WhatsApp conversation (and clean up the redundant webhook) in one step.
-- **Repeated "Connection was lost" logs** – WhatsApp sometimes drops the Web session with timeout errors. The bot now keeps retrying with exponential backoff instead of giving up after a handful of attempts, so you will see status updates in the control channel while it recovers. If it keeps failing for an extended time, rescan the QR code to create a fresh session.
-
-### Automatic updates
-
-Images are published to the GitHub Container Registry on every release, with
-immutable version tags (for example, `v2.0.0`) and moving channels:
-
-- `stable` (also published as `latest`) tracks the newest stable release.
-- `unstable` tracks the newest prerelease.
-
-The bot checks for updates on the chosen channel every couple of days. Set
-`WA2DC_UPDATE_CHANNEL=unstable` if you want to be notified about prereleases;
-otherwise `stable` is used.
-
-- Packaged binaries can download and apply updates after you confirm with the
-  `update` command. Set `WA2DC_KEEP_OLD_BINARY=1` if you want the previous
-  binary to be left on disk for easy rollback.
-- Switch channels from the control channel with `updateChannel stable|unstable`.
-- Packaged installs keep the previous binary so you can run `rollback` from the
-  control channel if a release breaks.
-- Docker and source installs never self-update. When the bot posts an update
-  notice in the control channel, review the changelog and pull the new image
-  yourself (for example, `docker compose pull wa2dc && docker compose up -d
-  wa2dc`). Pinning a specific tag lets you roll back quickly if something breaks.
-
----
-
-For setup and commands, check out the [documentation](https://arespawn.github.io/WhatsAppToDiscord/)!
+MIT License. See [LICENSE.txt](LICENSE.txt).
