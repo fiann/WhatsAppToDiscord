@@ -525,7 +525,8 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
     urlInfo.description = preview.description;
   }
 
-  const firstImage = preview.images?.find((imageUrl) => {
+  const images = Array.isArray(preview.images) ? preview.images : [];
+  const firstImage = images.find((imageUrl) => {
     if (typeof imageUrl !== 'string' || !imageUrl.startsWith('http')) return false;
     try {
       const url = new URL(imageUrl);
