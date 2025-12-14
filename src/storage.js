@@ -4,12 +4,13 @@ import path from 'path';
 import discordJs from 'discord.js';
 
 import state from './state.js';
+import { createDiscordClient } from './clientFactories.js';
 
 const isSmokeTest = process.env.WA2DC_SMOKE_TEST === '1';
 const STORAGE_DIR_MODE = 0o700;
 const STORAGE_FILE_MODE = 0o600;
 
-const { Client, Intents } = discordJs;
+const { Intents } = discordJs;
 
 const sanitizeStorageKey = (name = '') => {
   const raw = String(name)
@@ -128,7 +129,7 @@ const storage = {
 const setup = {
   async setupDiscordChannels(token) {
     return new Promise((resolve) => {
-      const client = new Client({ intents: [Intents.FLAGS.GUILDS] });
+      const client = createDiscordClient({ intents: [Intents.FLAGS.GUILDS] });
       client.once('ready', () => {
         state.logger?.info(
           `Invite the bot using the following link: https://discordapp.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20application.commands&permissions=536879120`,

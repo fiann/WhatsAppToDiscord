@@ -7,6 +7,15 @@ import { resetClientFactoryOverrides, setClientFactoryOverrides } from '../src/c
 import state from '../src/state.js';
 import utils from '../src/utils.js';
 
+const restoreObject = (target, snapshot) => {
+  Object.keys(target).forEach((key) => { delete target[key]; });
+  Object.assign(target, snapshot);
+};
+
+const importDiscordHandler = async (tag) => (
+  (await import(`../src/discordHandler.js?test=${encodeURIComponent(tag)}`)).default
+);
+
 test('Discord typing updates WhatsApp presence', async () => {
   const originalSetTimeout = global.setTimeout;
   const originalDiscordUtils = {
@@ -17,6 +26,7 @@ test('Discord typing updates WhatsApp presence', async () => {
   const originalSettings = {
     Token: state.settings.Token,
     GuildID: state.settings.GuildID,
+    oneWay: state.settings.oneWay,
   };
   const originalDcClient = state.dcClient;
   const originalWaClient = state.waClient;
@@ -61,7 +71,7 @@ test('Discord typing updates WhatsApp presence', async () => {
     const fakeClient = new FakeDiscordClient();
     setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
 
-    const discordHandler = (await import('../src/discordHandler.js')).default;
+    const discordHandler = await importDiscordHandler('typing');
     state.dcClient = await discordHandler.start();
 
     fakeClient.emit('typingStart', { channel: { id: 'chan-1' } });
@@ -83,6 +93,7 @@ test('Discord typing updates WhatsApp presence', async () => {
 
     state.settings.Token = originalSettings.Token;
     state.settings.GuildID = originalSettings.GuildID;
+    state.settings.oneWay = originalSettings.oneWay;
 
     if (originalChat === undefined) {
       delete state.chats['123@jid'];
@@ -92,6 +103,422 @@ test('Discord typing updates WhatsApp presence', async () => {
 
     state.dcClient = originalDcClient;
     state.waClient = originalWaClient;
+    resetClientFactoryOverrides();
+  }
+});
+
+test('oneWay gating blocks WhatsApp -> Discord forwards in discordHandler', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    getOrCreateChannel: utils.discord.getOrCreateChannel,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+    oneWay: state.settings.oneWay,
+  };
+  const originalDcClient = state.dcClient;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.settings.oneWay = 0b10; // Discord -> WhatsApp only
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+
+    const getOrCreateCalls = [];
+    utils.discord.getOrCreateChannel = async (jid) => {
+      getOrCreateCalls.push(jid);
+      return { send: async () => {} };
+    };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+    const discordHandler = await importDiscordHandler('oneway-wa-block');
+    state.dcClient = await discordHandler.start();
+
+    fakeClient.emit('whatsappMessage', {
+      id: 'wa-1',
+      name: 'Tester',
+      content: 'hello',
+      channelJid: 'jid@s.whatsapp.net',
+      file: null,
+      quote: null,
+      profilePic: null,
+      isGroup: false,
+      isForwarded: false,
+      isEdit: false,
+    });
+    await delay(0);
+    assert.equal(getOrCreateCalls.length, 0);
+
+    state.settings.oneWay = 0b11;
+    fakeClient.emit('whatsappMessage', {
+      id: 'wa-2',
+      name: 'Tester',
+      content: 'hello',
+      channelJid: 'jid@s.whatsapp.net',
+      file: null,
+      quote: null,
+      profilePic: null,
+      isGroup: false,
+      isForwarded: false,
+      isEdit: false,
+    });
+    await delay(0);
+    assert.equal(getOrCreateCalls.length, 1);
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.getOrCreateChannel = originalDiscordUtils.getOrCreateChannel;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+    state.settings.oneWay = originalSettings.oneWay;
+
+    state.dcClient = originalDcClient;
+    resetClientFactoryOverrides();
+  }
+});
+
+test('Discord messageDelete emits discordDelete for bridged messages', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    channelIdToJid: utils.discord.channelIdToJid,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+  };
+  const originalDcClient = state.dcClient;
+  const originalWaClient = state.waClient;
+  const originalLastMessages = state.lastMessages;
+  const originalReactions = state.reactions;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.lastMessages = { 'wa-1': 'dc-1', 'dc-1': 'wa-1' };
+    state.reactions = {};
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.channelIdToJid = () => 'jid@s.whatsapp.net';
+
+    const waEvents = [];
+    const waEv = new EventEmitter();
+    waEv.on('discordDelete', (payload) => waEvents.push(payload));
+    state.waClient = { ev: waEv };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+    const discordHandler = await importDiscordHandler('delete');
+    state.dcClient = await discordHandler.start();
+
+    fakeClient.emit('messageDelete', {
+      id: 'dc-1',
+      channelId: 'chan-1',
+      webhookId: null,
+      author: { id: 'user-1' },
+      channel: { send: async () => {} },
+    });
+    await delay(0);
+
+    assert.deepEqual(waEvents, [{ jid: 'jid@s.whatsapp.net', id: 'wa-1' }]);
+    assert.equal(state.lastMessages['wa-1'], undefined);
+    assert.equal(state.lastMessages['dc-1'], undefined);
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.channelIdToJid = originalDiscordUtils.channelIdToJid;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+
+    state.dcClient = originalDcClient;
+    state.waClient = originalWaClient;
+    state.lastMessages = originalLastMessages;
+    state.reactions = originalReactions;
+    resetClientFactoryOverrides();
+  }
+});
+
+test('Discord messageUpdate emits discordEdit for bridged messages', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    channelIdToJid: utils.discord.channelIdToJid,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+  };
+  const originalDcClient = state.dcClient;
+  const originalWaClient = state.waClient;
+  const originalLastMessages = state.lastMessages;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.lastMessages = { 'dc-edit': 'wa-edit' };
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.channelIdToJid = () => 'jid@s.whatsapp.net';
+
+    const waEvents = [];
+    const waEv = new EventEmitter();
+    waEv.on('discordEdit', (payload) => waEvents.push(payload));
+    state.waClient = { ev: waEv };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+    const discordHandler = await importDiscordHandler('edit');
+    state.dcClient = await discordHandler.start();
+
+    fakeClient.emit(
+      'messageUpdate',
+      { pinned: false },
+      {
+        id: 'dc-edit',
+        channelId: 'chan-1',
+        webhookId: null,
+        partial: false,
+        pinned: false,
+        editedTimestamp: Date.now(),
+        content: 'updated',
+        channel: { send: async () => {} },
+      },
+    );
+    await delay(0);
+
+    assert.equal(waEvents.length, 1);
+    assert.equal(waEvents[0].jid, 'jid@s.whatsapp.net');
+    assert.equal(waEvents[0].message.id, 'dc-edit');
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.channelIdToJid = originalDiscordUtils.channelIdToJid;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+
+    state.dcClient = originalDcClient;
+    state.waClient = originalWaClient;
+    state.lastMessages = originalLastMessages;
+    resetClientFactoryOverrides();
+  }
+});
+
+test('Discord pin changes sync to WhatsApp via waClient.sendMessage', async () => {
+  const originalSetTimeout = global.setTimeout;
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    channelIdToJid: utils.discord.channelIdToJid,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+  };
+  const originalDcClient = state.dcClient;
+  const originalWaClient = state.waClient;
+  const originalLastMessages = state.lastMessages;
+  const originalSentPins = new Set(state.sentPins);
+
+  try {
+    global.setTimeout = (fn, ms, ...args) => {
+      const handle = originalSetTimeout(fn, ms, ...args);
+      if (handle && typeof handle.unref === 'function') {
+        handle.unref();
+      }
+      return handle;
+    };
+
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.lastMessages = { 'dc-pin': 'wa-pin' };
+    state.sentPins.clear();
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.channelIdToJid = () => 'jid@s.whatsapp.net';
+
+    const sendCalls = [];
+    state.waClient = {
+      ev: new EventEmitter(),
+      async sendMessage(jid, content) {
+        sendCalls.push({ jid, content });
+        return {};
+      },
+    };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+    const discordHandler = await importDiscordHandler('pin');
+    state.dcClient = await discordHandler.start();
+
+    fakeClient.emit(
+      'messageUpdate',
+      { pinned: false },
+      {
+        id: 'dc-pin',
+        channelId: 'chan-1',
+        webhookId: null,
+        partial: false,
+        pinned: true,
+        editedTimestamp: null,
+        content: '',
+        channel: { send: async () => {} },
+      },
+    );
+    await delay(0);
+
+    assert.equal(sendCalls.length, 1);
+    assert.equal(sendCalls[0].jid, 'jid@s.whatsapp.net');
+    assert.equal(sendCalls[0].content.type, 1);
+    assert.equal(sendCalls[0].content.pin.id, 'wa-pin');
+    assert.equal(state.sentPins.has('wa-pin'), true);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.channelIdToJid = originalDiscordUtils.channelIdToJid;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+
+    state.dcClient = originalDcClient;
+    state.waClient = originalWaClient;
+    state.lastMessages = originalLastMessages;
+    state.sentPins.clear();
+    originalSentPins.forEach((id) => state.sentPins.add(id));
+    resetClientFactoryOverrides();
+  }
+});
+
+test('Discord reactions emit discordReaction towards WhatsApp', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    channelIdToJid: utils.discord.channelIdToJid,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+  };
+  const originalDcClient = state.dcClient;
+  const originalWaClient = state.waClient;
+  const originalLastMessages = state.lastMessages;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.lastMessages = { 'dc-react': 'wa-react' };
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.channelIdToJid = () => 'jid@s.whatsapp.net';
+
+    const waEvents = [];
+    const waEv = new EventEmitter();
+    waEv.on('discordReaction', (payload) => waEvents.push(payload));
+    state.waClient = { ev: waEv };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+    const discordHandler = await importDiscordHandler('reaction');
+    state.dcClient = await discordHandler.start();
+
+    fakeClient.emit('messageReactionAdd', {
+      emoji: { name: '🔥' },
+      message: {
+        id: 'dc-react',
+        channel: { id: 'chan-1', send: async () => {} },
+      },
+    }, { id: 'user-1' });
+
+    await delay(0);
+
+    assert.equal(waEvents.length, 1);
+    assert.equal(waEvents[0].jid, 'jid@s.whatsapp.net');
+    assert.equal(waEvents[0].removed, false);
+    assert.equal(waEvents[0].reaction.emoji.name, '🔥');
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.channelIdToJid = originalDiscordUtils.channelIdToJid;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+
+    state.dcClient = originalDcClient;
+    state.waClient = originalWaClient;
+    state.lastMessages = originalLastMessages;
     resetClientFactoryOverrides();
   }
 });
