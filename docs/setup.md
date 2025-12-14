@@ -64,6 +64,7 @@ Please don't get worried about the number of steps listed here. We wanted to be 
   <img src="_media/11.jpg" alt="Image showing #control-room with WhatsApp Web QR code" />
 </details>
 1. Then, just scan the QR code on your phone through WhatsApp. If you need help with that, check [WhatsApp's official help page](https://faq.whatsapp.com/539218963354346/?locale=en_US).
+1. **Recommended security step:** Restrict access to `#control-room` (and any bridged channels) using Discord permissions. WA2DC does not enforce per-user/role command authorization in-code, so Discord-side permissions are the intended access control.
 1. You are good to go! Now, you can explore [Commands](commands.md) to learn how to start conversations.
 
 # Linux/MacOS/Non-Windows Users

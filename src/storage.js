@@ -6,8 +6,22 @@ import discordJs from 'discord.js';
 import state from './state.js';
 
 const isSmokeTest = process.env.WA2DC_SMOKE_TEST === '1';
+const STORAGE_DIR_MODE = 0o700;
+const STORAGE_FILE_MODE = 0o600;
 
 const { Client, Intents } = discordJs;
+
+const sanitizeStorageKey = (name = '') => {
+  const raw = String(name)
+    .replace(/[\\/]+/g, '-')
+    .replace(/\0/g, '')
+    .trim();
+  const base = path.basename(raw);
+  if (!base || base === '.' || base === '..') {
+    throw new Error(`Invalid storage key: ${name}`);
+  }
+  return base;
+};
 
 const bidirectionalMap = (capacity, data = {}) => {
   const keys = Object.keys(data);
@@ -30,12 +44,22 @@ const bidirectionalMap = (capacity, data = {}) => {
 
 const storage = {
   _storageDir: './storage/',
+  async ensureStorageDir() {
+    await fs.mkdir(this._storageDir, { recursive: true, mode: STORAGE_DIR_MODE });
+  },
   async upsert(name, data) {
-    await fs.writeFile(path.join(this._storageDir, name), data)
+    const key = sanitizeStorageKey(name);
+    await this.ensureStorageDir();
+    const targetPath = path.join(this._storageDir, key);
+    await fs.writeFile(targetPath, data, { mode: STORAGE_FILE_MODE });
+    if (process.platform !== 'win32') {
+      await fs.chmod(targetPath, STORAGE_FILE_MODE).catch(() => {});
+    }
   },
 
   async get(name) {
-    return fs.readFile(path.join(this._storageDir, name)).catch(() => null)
+    const key = sanitizeStorageKey(name);
+    return fs.readFile(path.join(this._storageDir, key)).catch(() => null)
   },
 
   _settingsName: 'settings',

@@ -6,12 +6,15 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import dns from 'dns';
+import net from 'net';
 import { pipeline } from 'stream/promises';
 import { pathToFileURL } from 'url';
 import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
 import * as linkPreview from 'link-preview-js';
+import { Agent } from 'undici';
 
 import state from './state.js';
 import storage from './storage.js';
@@ -36,6 +39,7 @@ const MIME_BY_EXTENSION = {
 const LINK_PREVIEW_FETCH_TIMEOUT_MS = 3000;
 const LINK_PREVIEW_MAX_REDIRECTS = 5;
 const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
+const LINK_PREVIEW_MAX_BYTES = 1024 * 1024; // 1 MiB
 const EXPLICIT_URL_REGEX = /<?https?:\/\/[^\s>]+>?/i;
 const BARE_URL_REGEX = /(?:^|[\s<])((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=+#]*)?)/i;
 const TRAILING_PUNCTUATION_REGEX = /[)\],.;!?]+$/;
@@ -44,22 +48,309 @@ const UPDATE_BUTTON_IDS = {
   SKIP: 'wa2dc:skip-update',
 };
 const ROLLBACK_BUTTON_ID = 'wa2dc:rollback';
-const resolveLinkPreviewFn = () => {
+const resolveLinkPreviewFromContentFn = () => {
   const candidates = [
-    linkPreview,
-    linkPreview?.getLinkPreview,
-    linkPreview?.default,
-    linkPreview?.default?.getLinkPreview,
-    linkPreview?.['module.exports'],
-    linkPreview?.['module.exports']?.getLinkPreview,
+    linkPreview?.getPreviewFromContent,
+    linkPreview?.default?.getPreviewFromContent,
+    linkPreview?.['module.exports']?.getPreviewFromContent,
   ];
   return candidates.find((candidate) => typeof candidate === 'function') || null;
 };
-const getLinkPreviewFn = resolveLinkPreviewFn();
+const getPreviewFromContentFn = resolveLinkPreviewFromContentFn();
+
+const normalizeHostname = (hostname = '') => hostname.replace(/\.$/, '').toLowerCase();
+
+const ipv4ToInt = (addr) => {
+  const parts = String(addr).split('.');
+  if (parts.length !== 4) return null;
+  const bytes = parts.map((part) => Number(part));
+  if (bytes.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) return null;
+  return (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+};
+
+const isPrivateIPv4Int = (value) => {
+  if (!Number.isInteger(value)) return true;
+  const unsigned = value >>> 0;
+  const first = unsigned >>> 24;
+  const second = (unsigned >>> 16) & 0xff;
+
+  if (first === 10) return true; // 10.0.0.0/8
+  if (first === 127) return true; // 127.0.0.0/8 (loopback)
+  if (first === 169 && second === 254) return true; // 169.254.0.0/16 (link-local)
+  if (first === 172 && second >= 16 && second <= 31) return true; // 172.16.0.0/12
+  if (first === 192 && second === 168) return true; // 192.168.0.0/16
+  if (first === 0) return true; // 0.0.0.0/8 (software)
+  return false;
+};
+
+const isBlockedIp = (address = '') => {
+  const ipVersion = net.isIP(address);
+  if (ipVersion === 4) {
+    const asInt = ipv4ToInt(address);
+    return isPrivateIPv4Int(asInt);
+  }
+  if (ipVersion === 6) {
+    const normalized = address.toLowerCase();
+    if (normalized === '::' || normalized === '::1') return true; // unspecified / loopback
+    if (normalized.startsWith('::ffff:')) {
+      const tail = normalized.slice('::ffff:'.length);
+      if (net.isIP(tail) === 4) return isBlockedIp(tail);
+    }
+    // fc00::/7 (unique local)
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
+    // fe80::/10 (link-local)
+    if (normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) return true;
+    // ff00::/8 (multicast)
+    if (normalized.startsWith('ff')) return true;
+    return false;
+  }
+  return false;
+};
+
+const isBlockedHostname = (hostname = '') => {
+  const normalized = normalizeHostname(hostname);
+  if (!normalized) return true;
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+  return false;
+};
+
+const pickSafeLookupResult = (results = [], familyPreference) => {
+  const filtered = results
+    .filter((entry) => entry && entry.address && !isBlockedIp(entry.address))
+    .filter((entry) => (familyPreference ? entry.family === familyPreference : true));
+  if (!filtered.length) return null;
+  const ipv4 = filtered.find((entry) => entry.family === 4);
+  return ipv4 || filtered[0];
+};
+
+const linkPreviewLookup = (hostname, options, callback) => {
+  Promise.resolve()
+    .then(async () => {
+      const normalized = normalizeHostname(hostname);
+      if (isBlockedHostname(normalized)) {
+        throw new Error('Blocked hostname');
+      }
+
+      const ipVersion = net.isIP(normalized);
+      const wantsAll = Boolean(options?.all);
+      if (ipVersion) {
+        if (isBlockedIp(normalized)) {
+          throw new Error('Blocked IP address');
+        }
+        const entry = { address: normalized, family: ipVersion };
+        return wantsAll ? [entry] : entry;
+      }
+
+      const family = options?.family === 4 || options?.family === 6 ? options.family : undefined;
+      const results = await dns.promises.lookup(normalized, { all: true, verbatim: true });
+      const filtered = results
+        .filter((entry) => entry && entry.address && !isBlockedIp(entry.address))
+        .filter((entry) => (family ? entry.family === family : true));
+      if (!filtered.length) {
+        throw new Error('No public IPs resolved for host');
+      }
+      if (wantsAll) {
+        return filtered;
+      }
+      const picked = pickSafeLookupResult(filtered);
+      if (!picked) {
+        throw new Error('No public IPs resolved for host');
+      }
+      return picked;
+    })
+    .then((picked) => {
+      if (Array.isArray(picked)) {
+        callback(null, picked);
+        return;
+      }
+      callback(null, picked.address, picked.family);
+    })
+    .catch((err) => callback(err));
+};
+
+const linkPreviewDispatcher = new Agent({
+  connect: { lookup: linkPreviewLookup },
+});
+
+const isSafeUrlForPreviewFetch = async (candidate) => {
+  if (!candidate) return false;
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return false;
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) return false;
+  if (url.username || url.password) return false;
+  const hostname = normalizeHostname(url.hostname);
+  if (isBlockedHostname(hostname)) return false;
+
+  const ipVersion = net.isIP(hostname);
+  if (ipVersion) {
+    return !isBlockedIp(hostname);
+  }
+
+  let results;
+  try {
+    results = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(results) || results.length === 0) return false;
+  return results.every((entry) => entry?.address && !isBlockedIp(entry.address));
+};
+
+const readBodyWithLimit = async (body, maxBytes) => {
+  if (!body || typeof body.getReader !== 'function') {
+    return Buffer.alloc(0);
+  }
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      // eslint-disable-next-line no-await-in-loop
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength || value.length || 0;
+      if (total > maxBytes) {
+        const err = new Error('Response too large');
+        err.code = 'WA2DC_PREVIEW_TOO_LARGE';
+        throw err;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+  }
+  return Buffer.concat(chunks, total);
+};
+
+const validatePreviewTargetUrl = (candidate = '') => {
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new Error('Invalid URL');
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('Unsupported URL protocol');
+  }
+  if (url.username || url.password) {
+    throw new Error('Blocked URL credentials');
+  }
+  if (isBlockedHostname(url.hostname)) {
+    throw new Error('Blocked hostname');
+  }
+  if (isBlockedIp(url.hostname)) {
+    throw new Error('Blocked IP address');
+  }
+  return url;
+};
+
+const fetchPreviewResponse = async (url, { maxBytes = LINK_PREVIEW_MAX_BYTES } = {}) => {
+  let currentUrl = url;
+  let redirects = 0;
+  const shouldFollowRedirect = createRedirectHandler();
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    validatePreviewTargetUrl(currentUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LINK_PREVIEW_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(currentUrl, {
+        dispatcher: linkPreviewDispatcher,
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: {
+          'user-agent': 'WA2DC-LinkPreview',
+          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      });
+
+      const status = Number(response.status) || 0;
+      if (status >= 300 && status < 400) {
+        const locationHeader = response.headers.get('location') || '';
+        if (!locationHeader) {
+          throw new Error('Redirect without location');
+        }
+        if (redirects >= LINK_PREVIEW_MAX_REDIRECTS) {
+          throw new Error('Too many redirects');
+        }
+        const forwardedUrl = new URL(locationHeader, currentUrl).toString();
+        if (!shouldFollowRedirect(currentUrl, forwardedUrl)) {
+          throw new Error('Redirect blocked');
+        }
+        currentUrl = forwardedUrl;
+        redirects += 1;
+        continue;
+      }
+
+      if (status < 200 || status >= 300) {
+        throw new Error(`Unexpected status ${status}`);
+      }
+
+      const headers = {};
+      response.headers.forEach((value, key) => {
+        headers[String(key).toLowerCase()] = value;
+      });
+
+      const contentLength = Number(headers['content-length']);
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        const err = new Error('Response too large');
+        err.code = 'WA2DC_PREVIEW_TOO_LARGE';
+        throw err;
+      }
+
+      let data = '';
+      const contentType = headers['content-type'] || '';
+      const treatAsText = !contentType
+        || /^text\//i.test(contentType)
+        || /html|xml|json/i.test(contentType);
+      if (treatAsText) {
+        const buffer = await readBodyWithLimit(response.body, maxBytes);
+        data = buffer.toString('utf8');
+      }
+
+      return {
+        url: currentUrl,
+        headers,
+        data,
+      };
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+        throw new Error('Request timeout');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
 
 const sanitizeFileName = (name = '', fallback = 'file') => {
   const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
   return normalized || fallback;
+};
+
+const sanitizePathSegment = (name = '', fallback = 'file') => {
+  const raw = String(name)
+    .replace(/[\\/]+/g, '-')
+    .replace(/\0/g, '')
+    .trim();
+  const base = path.basename(raw);
+  const normalized = base.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 128);
+  if (!normalized || normalized === '.' || normalized === '..') {
+    return fallback;
+  }
+  return normalized;
 };
 
 const guessExtensionFromUrl = (url = '') => {
@@ -172,6 +463,11 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
   if (typeof uploadImage !== 'function' || !imageUrl) {
     return {};
   }
+  const safeToFetch = await isSafeUrlForPreviewFetch(imageUrl).catch(() => false);
+  if (!safeToFetch) {
+    state.logger?.warn({ imageUrl }, 'Blocked link preview thumbnail fetch (SSRF protection)');
+    return {};
+  }
   try {
     const { imageMessage } = await prepareWAMessageMedia({ image: { url: imageUrl } }, {
       upload: uploadImage,
@@ -194,7 +490,7 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
 
 const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
   const matchedText = extractUrlCandidate(text);
-  if (!matchedText || !getLinkPreviewFn) {
+  if (!matchedText || !getPreviewFromContentFn) {
     return undefined;
   }
   const normalizedUrl = normalizePreviewUrl(matchedText);
@@ -204,11 +500,8 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
 
   let preview;
   try {
-    preview = await getLinkPreviewFn(normalizedUrl, {
-      ...LINK_PREVIEW_FETCH_OPTS,
-      followRedirects: 'follow',
-      handleRedirects: createRedirectHandler(),
-    });
+    const response = await fetchPreviewResponse(normalizedUrl);
+    preview = await getPreviewFromContentFn(response, {});
   } catch (err) {
     if (!err?.message?.includes('receive a valid response')) {
       logger?.warn({ err, url: normalizedUrl }, 'Failed to fetch link preview');
@@ -232,7 +525,18 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
     urlInfo.description = preview.description;
   }
 
-  const firstImage = preview.images?.find((imageUrl) => typeof imageUrl === 'string' && imageUrl.startsWith('http'));
+  const firstImage = preview.images?.find((imageUrl) => {
+    if (typeof imageUrl !== 'string' || !imageUrl.startsWith('http')) return false;
+    try {
+      const url = new URL(imageUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) return false;
+      if (isBlockedHostname(url.hostname)) return false;
+      if (isBlockedIp(url.hostname)) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  });
   if (firstImage) {
     urlInfo.originalThumbnailUrl = firstImage;
     if (!process.pkg && typeof uploadImage === 'function') {
@@ -373,6 +677,12 @@ const updater = {
   isNode: process.argv0.replace('.exe', '').endsWith('node'),
 
   currentExeName: process.argv0.split(/[/\\]/).pop(),
+
+  get supportsSignedSelfUpdate() {
+    // Release signatures are required for safe self-updates. We currently do not
+    // ship signature files for some legacy releases.
+    return true;
+  },
 
   get channel() {
     const envChannel = process.env.WA2DC_UPDATE_CHANNEL?.toLowerCase();
@@ -541,7 +851,7 @@ const updater = {
     return signature;
   },
 
-  async validateSignature(signature, name) {
+  validateSignature(signature, name) {
     return crypto.verify(
       'RSA-SHA256',
       fs.readFileSync(name),
@@ -553,6 +863,10 @@ const updater = {
   async update(targetVersion = state.updateInfo?.version) {
     if (this.isNode) {
       state.logger?.info('Self-update is only available for packaged binaries.');
+      return false;
+    }
+    if (!this.supportsSignedSelfUpdate) {
+      state.logger?.info('Self-update is disabled on this platform (missing signed release artifacts).');
       return false;
     }
 
@@ -579,9 +893,23 @@ const updater = {
       await this.revertChanges();
       return false;
     }
+    if (os.platform() !== 'win32') {
+      try {
+        await fs.promises.chmod(currExeName, 0o755);
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to mark the updated binary as executable.');
+        await this.revertChanges();
+        return false;
+      }
+    }
 
     const signature = await this.downloadSignature(defaultExeName, targetVersion);
-    if (signature && !this.validateSignature(signature.result, currExeName)) {
+    if (!signature) {
+      state.logger?.error('Missing signature for the requested update. Reverting back.');
+      await this.revertChanges();
+      return false;
+    }
+    if (!this.validateSignature(signature.result, currExeName)) {
       state.logger?.error("Couldn't verify the signature of the updated binary, reverting back. Please update manually.");
       await this.revertChanges();
       return false;
@@ -636,7 +964,7 @@ const updater = {
     }
 
     const channel = this.channel;
-    const canSelfUpdate = !this.isNode;
+    const canSelfUpdate = !this.isNode && this.supportsSignedSelfUpdate;
 
     this.cleanOldVersion();
     const newVer = await this.fetchLatestVersion(channel);
@@ -780,9 +1108,23 @@ const sqliteToJson = {
       state.logger?.error('Download failed! Please convert database manually.');
       return false;
     }
+    if (os.platform() !== 'win32') {
+      try {
+        await fs.promises.chmod(exeName, 0o755);
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to mark the database converter as executable.');
+        fs.unlinkSync(exeName);
+        return false;
+      }
+    }
 
     const signature = await this.downloadSignature(exeName);
-    if (signature && !updater.validateSignature(signature.result, exeName)) {
+    if (!signature) {
+      state.logger?.error("Couldn't fetch the signature of the database converter. Please convert database manually");
+      fs.unlinkSync(exeName);
+      return false;
+    }
+    if (!updater.validateSignature(signature.result, exeName)) {
       state.logger?.error("Couldn't verify the signature of the database converter. Please convert database manually");
       fs.unlinkSync(exeName);
       return false;
@@ -792,16 +1134,34 @@ const sqliteToJson = {
   },
 
   runStj(exeName) {
-    fs.mkdirSync(this._storageDir);
-    if (os.platform() !== 'win32') {
-      exeName = './' + exeName;
-    }
-    const child = childProcess.spawnSync(exeName, [this._dbPath, '"SELECT * FROM WA2DC"'], { shell: true });
+    fs.mkdirSync(this._storageDir, { recursive: true, mode: 0o700 });
+    const exePath = path.resolve(exeName);
 
-    const rows = child.stdout.toString().trim().split('\n');
-    for (let i = 0; i < rows.length; i++) {
-      const row = JSON.parse(rows[i]);
-      fs.writeFileSync(path.join(this._storageDir, row[0]), row[1])
+    const child = childProcess.spawnSync(exePath, [this._dbPath, 'SELECT * FROM WA2DC'], { shell: false });
+    if (child.error) {
+      throw child.error;
+    }
+    if (typeof child.status === 'number' && child.status !== 0) {
+      const stderr = child.stderr ? child.stderr.toString() : '';
+      throw new Error(`Database converter failed (exit ${child.status})${stderr ? `: ${stderr}` : ''}`);
+    }
+
+    const allowedKeys = new Set(['settings', 'chats', 'contacts', 'lastMessages', 'lastTimestamp']);
+    const raw = child.stdout ? child.stdout.toString().trim() : '';
+    if (!raw) {
+      return;
+    }
+
+    const rows = raw.split('\n');
+    for (const line of rows) {
+      if (!line) continue;
+      const row = JSON.parse(line);
+      const key = sanitizePathSegment(row?.[0] ?? '', '');
+      if (!key || !allowedKeys.has(key)) {
+        state.logger?.warn({ key: row?.[0] }, 'Skipping unexpected storage key during database migration');
+        continue;
+      }
+      fs.writeFileSync(path.join(this._storageDir, key), row?.[1] ?? '', { mode: 0o600 });
     }
   },
 
@@ -1594,14 +1954,28 @@ const discord = {
     }
   },
   async findAvailableName(dir, fileName) {
-    let absPath;
-    let parsedFName = path.parse(fileName);
-    let counter = -1;
-    do {
-      absPath = path.resolve(dir, parsedFName.name + (counter === -1 ? "" : counter) + parsedFName.ext);
-      counter++;
-    } while (await fs.promises.stat(absPath).catch(() => false));
-    return [absPath, parsedFName.name + (counter === -1 ? "" : counter) + parsedFName.ext];
+    const safeName = sanitizePathSegment(fileName, 'file');
+    const parsed = path.parse(safeName);
+    const baseName = parsed.name || 'file';
+    const ext = parsed.ext || '';
+
+    let counter = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const suffix = counter === 0 ? '' : `-${counter}`;
+      const candidate = `${baseName}${suffix}${ext}`;
+      const absPath = path.resolve(dir, candidate);
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await fs.promises.stat(absPath);
+        counter += 1;
+      } catch (err) {
+        if (err?.code === 'ENOENT') {
+          return [absPath, candidate];
+        }
+        throw err;
+      }
+    }
   },
   async pruneDownloadsDir(ignorePath) {
     const limitGB = state.settings.DownloadDirLimitGB;
@@ -1641,7 +2015,7 @@ const discord = {
     }
   },
   async downloadLargeFile(file) {
-    await fs.promises.mkdir(state.settings.DownloadDir, { recursive: true });
+    await fs.promises.mkdir(state.settings.DownloadDir, { recursive: true, mode: 0o700 });
     const [absPath, fileName] = await this.findAvailableName(state.settings.DownloadDir, file.name);
     const writeFromDownloadCtx = async () => {
       const stream = await downloadContentFromMessage(
@@ -1649,16 +2023,16 @@ const discord = {
         file.msgType.replace('Message', ''),
         { logger: state.logger, reuploadRequest: state.waClient.updateMediaMessage },
       );
-      await pipeline(stream, fs.createWriteStream(absPath));
+      await pipeline(stream, fs.createWriteStream(absPath, { mode: 0o600 }));
     };
 
     try {
       if (typeof file.attachment?.pipe === 'function') {
-        await pipeline(file.attachment, fs.createWriteStream(absPath));
+        await pipeline(file.attachment, fs.createWriteStream(absPath, { mode: 0o600 }));
       } else if (file.downloadCtx) {
         await writeFromDownloadCtx();
       } else {
-        await fs.promises.writeFile(absPath, file.attachment);
+        await fs.promises.writeFile(absPath, file.attachment, { mode: 0o600 });
       }
     } catch (err) {
       // Retry once for transient network errors when we can recreate the stream.

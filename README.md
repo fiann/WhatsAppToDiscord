@@ -19,6 +19,12 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), the project is now
 - Bridges WhatsApp polls into Discord (creation and live updates; voting stays in WhatsApp due to API limits)
 - Self-hosted: runs on your own machine/server
 
+## Security notes
+
+- WA2DC intentionally relies on Discord permissions for access control. Keep the control channel private and restrict who can use bot commands using Discord role/channel permissions.
+- Link previews are fetched by the bot host to generate WhatsApp previews; loopback/private/link-local addresses are blocked.
+- Self-update is only supported when signed release artifacts are available (packaged builds that ship a matching `.sig` file). This signature is separate from Apple notarization/codesigning.
+
 ## Disclaimer
 
 This project is not affiliated, associated, authorized, endorsed by, or in any way officially connected with WhatsApp or any of its subsidiaries or its affiliates. The official WhatsApp website can be found at whatsapp.com. "WhatsApp" as well as related names, marks, emblems and images are registered trademarks of their respective owners.
