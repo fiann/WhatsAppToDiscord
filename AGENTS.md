@@ -17,8 +17,7 @@ Docs for end-users live in `docs/` and are published via docsify.
 
 Prereqs:
 
-- Node.js **>= 20** (repo uses ESM; CI uses Node 20)
-- Python (for CI-style tests): `pip install -r requirements.txt`
+- Node.js **>= 20** (repo uses ESM)
 
 Common commands:
 
@@ -30,7 +29,7 @@ Common commands:
 Quick “does it boot?” check without external connections:
 
 - Smoke boot: `WA2DC_SMOKE_TEST=1 node src/index.js`
-  - CI verifies this via `tests/test_boot.py`.
+  - CI verifies this via `tests/smokeBoot.test.js`.
   - It skips Discord + WhatsApp client startup and exits successfully once initialization completes.
 
 ## Repository map (where to look first)
@@ -58,7 +57,6 @@ Core runtime (`src/`):
 Tests (`tests/`):
 
 - Primary suite is Node’s built-in runner (`node --test`) via `npm test`.
-- A small Python smoke boot test remains (`pytest -q tests/test_boot.py`).
 - CI workflow: `.github/workflows/ci-tests.yml`
 
 ## Runtime files & side effects (don’t break these)
@@ -148,10 +146,9 @@ Preferred quick checks before handing off a change:
 
 - JS lint: `npm run lint`
 - JS unit/behavior tests: `npm test` (Node’s built-in `node --test`)
-- Python smoke boot: `pip install -r requirements.txt && pytest -q tests/test_boot.py`
 - Smoke boot (manual): `WA2DC_SMOKE_TEST=1 node src/index.js`
 
-CI runs `npm test` plus the Python smoke boot test.
+CI runs `npm test` (which includes the smoke boot test).
 
 ## Build / release notes (so you don’t accidentally break packaging)
 
