@@ -20,6 +20,9 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Run Node unit tests
+        run: npm test
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -28,10 +31,5 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Run unit and integration tests
-        run: pytest -q
-
-      - name: Run smoke boot test
-        env:
-          WA2DC_SMOKE_TEST: '1'
-        run: node src/index.js
+      - name: Run Python smoke boot test
+        run: pytest -q tests/test_boot.py

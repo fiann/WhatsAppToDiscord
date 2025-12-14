@@ -30,7 +30,7 @@ Common commands:
 Quick “does it boot?” check without external connections:
 
 - Smoke boot: `WA2DC_SMOKE_TEST=1 node src/index.js`
-  - This is what CI uses after pytest.
+  - CI verifies this via `tests/test_boot.py`.
   - It skips Discord + WhatsApp client startup and exits successfully once initialization completes.
 
 ## Repository map (where to look first)
@@ -57,8 +57,8 @@ Core runtime (`src/`):
 
 Tests (`tests/`):
 
-- Primary suite is **pytest** (`requirements.txt` only lists `pytest`).
-- Many tests run small Node snippets (`node -e ...`) to exercise JS modules.
+- Primary suite is Node’s built-in runner (`node --test`) via `npm test`.
+- A small Python smoke boot test remains (`pytest -q tests/test_boot.py`).
 - CI workflow: `.github/workflows/ci-tests.yml`
 
 ## Runtime files & side effects (don’t break these)
@@ -147,10 +147,11 @@ If you must rename/remove a setting, add a migration path (don’t silently brea
 Preferred quick checks before handing off a change:
 
 - JS lint: `npm run lint`
-- Python suite: `pip install -r requirements.txt && pytest -q`
-- Smoke boot: `WA2DC_SMOKE_TEST=1 node src/index.js`
+- JS unit/behavior tests: `npm test` (Node’s built-in `node --test`)
+- Python smoke boot: `pip install -r requirements.txt && pytest -q tests/test_boot.py`
+- Smoke boot (manual): `WA2DC_SMOKE_TEST=1 node src/index.js`
 
-Note: there are also `tests/*.test.js` files, but CI currently runs pytest + the smoke boot.
+CI runs `npm test` plus the Python smoke boot test.
 
 ## Build / release notes (so you don’t accidentally break packaging)
 
@@ -172,4 +173,3 @@ This bot handles sensitive data (WhatsApp session, Discord token, message conten
 - Do not log secrets (tokens, QR codes, auth state blobs).
 - Be careful when expanding crash reports: they’re sent to Discord or written to disk.
 - Link previews intentionally block loopback/private/link-local targets (see `src/utils.js`). Don’t weaken those safeguards.
-
