@@ -26,6 +26,13 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by 
 
 **Note:** Due to limitations of the WhatsApp Web protocol, the bot can only notify you of incoming or missed calls. It cannot forward the audio or video streams of a WhatsApp call to Discord.
 
+## Security notes
+
+- WA2DC intentionally does **not** implement per-user/role authorization for commands. Use Discord channel/role permissions (and Discord's command permissions UI) to control who can use the bot.
+- Keep `#control-room` private. It contains WhatsApp QR codes and is where you manage links/updates/settings.
+- Link previews are fetched by the bot host to generate WhatsApp previews. For safety, WA2DC blocks link-preview fetches to loopback/private/link-local addresses and enforces tight size/timeouts; internal URLs may not show a preview.
+- Self-update is only supported when signed release artifacts are available (packaged builds that ship a matching `.sig` file). This signature is separate from Apple notarization/codesigning.
+
 ## Baileys 7 migration
 
 This repository tracks Baileys `7.0.0-rc.9`. Upstream outlines every breaking change in their migration article: [https://whiskey.so/migrate-latest](https://whiskey.so/migrate-latest). Notes and common workarounds:

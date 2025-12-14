@@ -57,6 +57,7 @@ jobs:
           echo "$SIGN_KEY" > private.pem
           openssl dgst -sha256 -sign private.pem -out build/WA2DC-Linux.sig        build/WA2DC-Linux
           openssl dgst -sha256 -sign private.pem -out build/WA2DC-Linux-arm64.sig  build/WA2DC-Linux-arm64
+          openssl dgst -sha256 -sign private.pem -out build/WA2DC-macOS.sig        build/WA2DC-macOS
           openssl dgst -sha256 -sign private.pem -out build/WA2DC.exe.sig          build/WA2DC.exe
           rm private.pem
 
@@ -115,6 +116,7 @@ jobs:
             build/WA2DC-Linux-arm64.sig
             build/WA2DC-macOS
             build/WA2DC-macOS.sha256
+            build/WA2DC-macOS.sig
             build/WA2DC.exe
             build/WA2DC.exe.sha256
             build/WA2DC.exe.sig
