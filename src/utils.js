@@ -2206,7 +2206,12 @@ const whatsapp = {
     let preferred = this.formatJid(primary);
     let fallback = this.formatJid(alternate);
     if (preferred && fallback) {
-      this.migrateLegacyJid(fallback, preferred);
+      const phone = this.isPhoneJid(preferred) ? preferred : (this.isPhoneJid(fallback) ? fallback : null);
+      const lid = this.isLidJid(preferred) ? preferred : (this.isLidJid(fallback) ? fallback : null);
+      if (phone && lid) {
+        this.migrateLegacyJid(lid, phone);
+        return [phone, lid];
+      }
       return [preferred, fallback];
     }
 
@@ -2219,15 +2224,15 @@ const whatsapp = {
       if (!fallback && this.isLidJid(preferred) && typeof store.getPNForLID === 'function') {
         const pnJid = this.formatJid(await store.getPNForLID(preferred));
         if (pnJid) {
-          fallback = pnJid;
-          this.migrateLegacyJid(pnJid, preferred);
+          fallback = preferred;
+          preferred = pnJid;
+          this.migrateLegacyJid(fallback, preferred);
         }
       } else if (!fallback && this.isPhoneJid(preferred) && typeof store.getLIDForPN === 'function') {
         const lidJid = this.formatJid(await store.getLIDForPN(preferred));
         if (lidJid) {
-          this.migrateLegacyJid(preferred, lidJid);
-          fallback = preferred;
-          preferred = lidJid;
+          fallback = lidJid;
+          this.migrateLegacyJid(lidJid, preferred);
         }
       }
     } catch (err) {
@@ -2485,16 +2490,26 @@ const whatsapp = {
         || contact?.notify
         || contact?.pushName;
       if (!name) continue;
-      const preferredId = this.formatJid(contact?.id);
-      let alternateId = null;
-      if (contact?.phoneNumber) {
-        alternateId = this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`);
-      } else if (contact?.lid) {
-        alternateId = this.formatJid(contact.lid);
-      }
-      if (preferredId && alternateId) {
+      const id = this.formatJid(contact?.id);
+      const pnFromField = contact?.phoneNumber
+        ? this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`)
+        : null;
+      const pnFromId = id && this.isPhoneJid(id) ? id : null;
+      const lidFromField = contact?.lid ? this.formatJid(contact.lid) : null;
+      const lidFromId = id && this.isLidJid(id) ? id : null;
+
+      const pnJid = pnFromField || pnFromId;
+      const lidJid = lidFromField || lidFromId;
+
+      const preferredId = pnJid || id || lidJid;
+      const alternateId = preferredId === pnJid
+        ? (lidJid && lidJid !== preferredId ? lidJid : (id && id !== preferredId ? id : null))
+        : (pnJid && pnJid !== preferredId ? pnJid : (lidJid && lidJid !== preferredId ? lidJid : null));
+
+      if (preferredId && alternateId && this.isPhoneJid(preferredId) && this.isLidJid(alternateId)) {
         this.migrateLegacyJid(alternateId, preferredId);
       }
+
       const targetId = preferredId || alternateId;
       if (!targetId) continue;
       state.waClient.contacts[targetId] = name;

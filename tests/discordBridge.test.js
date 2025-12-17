@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 
+import discordJs from 'discord.js';
+
 import { resetClientFactoryOverrides, setClientFactoryOverrides } from '../src/clientFactories.js';
 import state from '../src/state.js';
 import utils from '../src/utils.js';
@@ -266,6 +268,78 @@ test('Discord messageDelete emits discordDelete for bridged messages', async () 
     state.waClient = originalWaClient;
     state.lastMessages = originalLastMessages;
     state.reactions = originalReactions;
+    resetClientFactoryOverrides();
+  }
+});
+
+test('Discord pin system messages are not forwarded to WhatsApp', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    channelIdToJid: utils.discord.channelIdToJid,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+    ControlChannelID: state.settings.ControlChannelID,
+  };
+  const originalDcClient = state.dcClient;
+  const originalWaClient = state.waClient;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.settings.ControlChannelID = 'control';
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.channelIdToJid = () => 'jid@s.whatsapp.net';
+
+    const waEvents = [];
+    const waEv = new EventEmitter();
+    waEv.on('discordMessage', (payload) => waEvents.push(payload));
+    state.waClient = { ev: waEv };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+
+    const discordHandler = await importDiscordHandler('pin-system-message');
+    state.dcClient = await discordHandler.start();
+
+    const pinnedType = discordJs.Constants.MessageTypes.indexOf('CHANNEL_PINNED_MESSAGE');
+    fakeClient.emit('messageCreate', {
+      author: { id: 'user-1' },
+      applicationId: null,
+      webhookId: null,
+      type: pinnedType,
+      channel: { id: 'chan-1' },
+    });
+    await delay(0);
+
+    assert.equal(waEvents.length, 0);
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.channelIdToJid = originalDiscordUtils.channelIdToJid;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+    state.settings.ControlChannelID = originalSettings.ControlChannelID;
+
+    state.dcClient = originalDcClient;
+    state.waClient = originalWaClient;
     resetClientFactoryOverrides();
   }
 });
