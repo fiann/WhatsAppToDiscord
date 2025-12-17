@@ -1820,6 +1820,11 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  const messageType = typeof message.type === 'number' ? Constants.MessageTypes?.[message.type] : message.type;
+  if (messageType === 'CHANNEL_PINNED_MESSAGE') {
+    return;
+  }
+
   if (message.channel.id === state.settings.ControlChannelID) {
     await message.channel.send('Regular commands have been removed. Please use Discord slash commands (/) instead.');
     return;
