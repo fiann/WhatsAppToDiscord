@@ -339,6 +339,17 @@ const patchSendMessageForLinkPreviews = (client) => {
     });
     const baseSendMessage = client.sendMessage.bind(client);
     client.sendMessage = async (jid, content, options) => {
+        let sendJid = jid;
+        try {
+            if (typeof utils.whatsapp.hydrateJidPair === 'function') {
+                const [resolvedJid] = await utils.whatsapp.hydrateJidPair(jid);
+                sendJid = resolvedJid || jid;
+            } else if (typeof utils.whatsapp.formatJid === 'function') {
+                sendJid = utils.whatsapp.formatJid(jid) || jid;
+            }
+        } catch (err) {
+            state.logger?.debug?.({ err, jid }, 'Failed to resolve preferred WhatsApp JID for sendMessage');
+        }
         const normalizedOptions = options ? { ...options } : {};
         if (!normalizedOptions.logger) {
             normalizedOptions.logger = state.logger;
@@ -347,7 +358,7 @@ const patchSendMessageForLinkPreviews = (client) => {
         if (needsGeneratedPreview && !normalizedOptions.getUrlInfo) {
             normalizedOptions.getUrlInfo = defaultGetUrlInfo;
         }
-        return baseSendMessage(jid, content, normalizedOptions);
+        return baseSendMessage(sendJid, content, normalizedOptions);
     };
     client.__wa2dcLinkPreviewPatched = true;
 };
@@ -377,24 +388,25 @@ const ensureSignalStoreSupport = async (keyStore) => {
 const migrateLegacyChats = async (client) => {
     const store = client.signalRepository?.lidMapping;
     if (!store) return;
-    const pnJids = Object.keys(state.chats).filter((jid) => jid.endsWith('@s.whatsapp.net'));
-    if (!pnJids.length) return;
+    const lidJids = Object.keys(state.chats).filter((jid) => jid.endsWith('@lid'));
+    if (!lidJids.length) return;
     try {
-        const mappings = typeof store.getLIDsForPNs === 'function'
-            ? await store.getLIDsForPNs(pnJids)
+        const mappings = typeof store.getPNsForLIDs === 'function'
+            ? await store.getPNsForLIDs(lidJids)
             : {};
-        for (const pnJid of pnJids) {
-            let lidJid = mappings?.[pnJid];
-            if (!lidJid && typeof store.getLIDForPN === 'function') {
+        for (const lidJid of lidJids) {
+            let pnJid = mappings?.[lidJid];
+            if (!pnJid && typeof store.getPNForLID === 'function') {
                 // eslint-disable-next-line no-await-in-loop
-                lidJid = await store.getLIDForPN(pnJid);
+                pnJid = await store.getPNForLID(lidJid);
             }
-            if (lidJid) {
-                utils.whatsapp.migrateLegacyJid(pnJid, lidJid);
+            const formattedPn = utils.whatsapp.formatJid(pnJid);
+            if (formattedPn && utils.whatsapp.isPhoneJid(formattedPn)) {
+                utils.whatsapp.migrateLegacyJid(lidJid, formattedPn);
             }
         }
     } catch (err) {
-        state.logger?.warn({ err }, 'Failed to migrate PN chats to LIDs');
+        state.logger?.warn({ err }, 'Failed to migrate LID chats to PNs');
     }
 };
 
@@ -514,12 +526,14 @@ const connectToWhatsApp = async (retry = 1) => {
         const normalizedLid = utils.whatsapp.formatJid(lid);
         const normalizedPn = utils.whatsapp.formatJid(pn);
         if (!normalizedLid || !normalizedPn) return;
-        const firstIsLid = utils.whatsapp.isLidJid(normalizedLid);
-        const secondIsLid = utils.whatsapp.isLidJid(normalizedPn);
-        if (firstIsLid && !secondIsLid) {
-            utils.whatsapp.migrateLegacyJid(normalizedPn, normalizedLid);
-        } else if (!firstIsLid && secondIsLid) {
-            utils.whatsapp.migrateLegacyJid(normalizedLid, normalizedPn);
+        const lidJid = utils.whatsapp.isLidJid(normalizedLid)
+            ? normalizedLid
+            : (utils.whatsapp.isLidJid(normalizedPn) ? normalizedPn : null);
+        const pnJid = utils.whatsapp.isPhoneJid(normalizedLid)
+            ? normalizedLid
+            : (utils.whatsapp.isPhoneJid(normalizedPn) ? normalizedPn : null);
+        if (lidJid && pnJid) {
+            utils.whatsapp.migrateLegacyJid(lidJid, pnJid);
         }
     });
 
