@@ -7,18 +7,146 @@
     <meta name="description" content="WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Discord and WhatsApp. It brings your WhatsApp conversations to Discord!" />
     <meta name="keywords" content="WhatsApp To Discord, WhatsApp Discord Bridge, WA2DC, Discord, WhatsApp">
     <meta name="author" content="arespawn (originally by Fatih Kilic)">
+    <meta name="color-scheme" content="light dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0" />
 	    <meta name="google-site-verification" content="4WuEAQieonPKWBwMh1Yl3NyKWJiGcYt8u3ijQfHU26g" />
-    <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css" />
+    <link id="docsify-theme" rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css" />
+    <style>
+      .wa2dc-theme-toggle {
+        display: flex;
+        padding: 10px 15px 0;
+      }
+
+      .wa2dc-theme-toggle button {
+        cursor: pointer;
+        border: 1px solid currentColor;
+        background: transparent;
+        color: inherit;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        line-height: 1;
+        opacity: 0.9;
+      }
+
+      .wa2dc-theme-toggle button:hover {
+        opacity: 1;
+        background: rgba(127, 127, 127, 0.15);
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
     <script>
+      const WA2DC_DOCS_THEME_STORAGE_KEY = 'wa2dc_docs_theme';
+      const WA2DC_DOCS_THEMES = Object.freeze({
+        light: '//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css',
+        dark: '//cdn.jsdelivr.net/npm/docsify@4/lib/themes/dark.css',
+      });
+      const WA2DC_DOCS_LOGO = '_media/logo.png';
+
+      function wa2dcGetSavedTheme() {
+        try {
+          return localStorage.getItem(WA2DC_DOCS_THEME_STORAGE_KEY);
+        } catch {
+          return null;
+        }
+      }
+
+      let wa2dcCurrentTheme = wa2dcGetSavedTheme();
+      if (wa2dcCurrentTheme !== 'dark' && wa2dcCurrentTheme !== 'light') {
+        wa2dcCurrentTheme = 'light';
+      }
+
+      function wa2dcSetTheme(theme) {
+        wa2dcCurrentTheme = theme === 'dark' ? 'dark' : 'light';
+
+        const themeLink = document.getElementById('docsify-theme');
+        if (themeLink) {
+          themeLink.href = WA2DC_DOCS_THEMES[wa2dcCurrentTheme];
+        }
+
+        document.documentElement.setAttribute('data-wa2dc-theme', wa2dcCurrentTheme);
+
+        try {
+          localStorage.setItem(WA2DC_DOCS_THEME_STORAGE_KEY, wa2dcCurrentTheme);
+        } catch {
+          // ignore
+        }
+
+        wa2dcUpdateThemeToggle();
+        wa2dcUpdateLogo();
+      }
+
+      function wa2dcUpdateThemeToggle() {
+        const toggleButton = document.getElementById('wa2dc-theme-toggle-btn');
+        if (!toggleButton) return;
+
+        const nextTheme = wa2dcCurrentTheme === 'dark' ? 'light' : 'dark';
+        toggleButton.textContent = `Switch to ${nextTheme}`;
+        toggleButton.setAttribute('aria-label', `Switch to ${nextTheme} theme`);
+        toggleButton.setAttribute('title', `Switch to ${nextTheme} theme`);
+      }
+
+      function wa2dcUpdateLogo() {
+        const logoImage = document.querySelector('.app-name-link img, .app-name img');
+        if (!logoImage) return;
+
+        if (logoImage.getAttribute('src') !== WA2DC_DOCS_LOGO) {
+          logoImage.setAttribute('src', WA2DC_DOCS_LOGO);
+        }
+      }
+
+      function wa2dcEnsureThemeToggle() {
+        if (document.getElementById('wa2dc-theme-toggle')) return;
+
+        const sidebar = document.querySelector('.sidebar');
+        if (!sidebar) return;
+
+        const container = document.createElement('div');
+        container.id = 'wa2dc-theme-toggle';
+        container.className = 'wa2dc-theme-toggle';
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.id = 'wa2dc-theme-toggle-btn';
+        button.addEventListener('click', () => {
+          wa2dcSetTheme(wa2dcCurrentTheme === 'dark' ? 'light' : 'dark');
+        });
+
+        container.appendChild(button);
+
+        const appName = sidebar.querySelector('.app-name');
+        if (appName) {
+          appName.insertAdjacentElement('afterend', container);
+        } else {
+          sidebar.insertAdjacentElement('afterbegin', container);
+        }
+
+        wa2dcUpdateThemeToggle();
+      }
+
+      // Apply the theme before Docsify renders.
+      wa2dcSetTheme(wa2dcCurrentTheme);
+
       window.$docsify = {
         loadSidebar: true,
         subMaxLevel: 2,
         name: 'WhatsApp To Discord',
+        logo: WA2DC_DOCS_LOGO,
         repo: 'arespawn/WhatsAppToDiscord',
+        plugins: [
+          (hook) => {
+            hook.ready(() => {
+              wa2dcEnsureThemeToggle();
+              wa2dcUpdateLogo();
+            });
+
+            hook.doneEach(() => {
+              wa2dcUpdateLogo();
+            });
+          },
+        ],
       };
     </script>
     <!-- Docsify v4 -->
