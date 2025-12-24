@@ -6,22 +6,19 @@ import fs from 'fs';
 import { pathToFileURL } from 'url';
 import { promisify } from 'util';
 
-const DEFAULT_RESTART_DELAY = 10000; // ms
-const parsedRestartDelay = Number(process.env.WA2DC_RESTART_DELAY);
-const RESTART_DELAY = Number.isFinite(parsedRestartDelay) && parsedRestartDelay >= 0
-  ? parsedRestartDelay
-  : DEFAULT_RESTART_DELAY;
+import {
+  clearRestartFlagSync,
+  evaluateWorkerExit,
+  resolveMaxRestarts,
+  resolveRestartDelayMs,
+  resolveRestartFlagPath,
+  resolveSafeRuntimeResetWindowMs,
+} from './runnerLogic.js';
 
-const SAFE_RUNTIME_RESET_WINDOW = Math.max(RESTART_DELAY, DEFAULT_RESTART_DELAY);
-
-const parsedMaxRestarts = Number(process.env.WA2DC_MAX_RESTARTS);
-const MAX_RESTARTS = Number.isFinite(parsedMaxRestarts) && parsedMaxRestarts > 0
-  ? parsedMaxRestarts
-  : 5;
-
-const RESTART_FLAG_PATH = process.env.WA2DC_RESTART_FLAG_PATH
-  ? path.resolve(process.env.WA2DC_RESTART_FLAG_PATH)
-  : path.resolve(process.cwd(), 'restart.flag');
+const RESTART_DELAY = resolveRestartDelayMs(process.env.WA2DC_RESTART_DELAY);
+const SAFE_RUNTIME_RESET_WINDOW = resolveSafeRuntimeResetWindowMs(RESTART_DELAY);
+const MAX_RESTARTS = resolveMaxRestarts(process.env.WA2DC_MAX_RESTARTS);
+const RESTART_FLAG_PATH = resolveRestartFlagPath(process.env.WA2DC_RESTART_FLAG_PATH, process.cwd());
 
 const overrideChildUrl = process.env.WA2DC_CHILD_PATH
   ? pathToFileURL(path.resolve(process.env.WA2DC_CHILD_PATH))
@@ -84,56 +81,45 @@ async function main() {
   let currentWorker = null;
   let shuttingDown = false;
 
-  const clearRestartFlag = () => {
-    if (!fs.existsSync(RESTART_FLAG_PATH)) {
-      return false;
-    }
-    try {
-      fs.unlinkSync(RESTART_FLAG_PATH);
-    } catch (err) {
-      if (err.code !== 'ENOENT') {
-        logger.warn({ err }, 'Failed to remove restart flag');
-      }
-    }
-    return true;
-  };
-
   const handleExit = (code, signal) => {
     if (shuttingDown) {
       process.exit(code ?? 0);
     }
 
-    const restartRequested = clearRestartFlag();
     const runtime = Date.now() - workerStartTime;
-    if (runtime > SAFE_RUNTIME_RESET_WINDOW) {
-      restartAttempts = 0;
+    const restartRequested = clearRestartFlagSync(RESTART_FLAG_PATH, { logger });
+
+    const decision = evaluateWorkerExit({
+      exitCode: code,
+      restartRequested,
+      runtimeMs: runtime,
+      safeRuntimeResetWindowMs: SAFE_RUNTIME_RESET_WINDOW,
+      restartAttempts,
+      maxRestarts: MAX_RESTARTS,
+      restartDelayMs: RESTART_DELAY,
+    });
+
+    restartAttempts = decision.restartAttempts;
+
+    if (decision.action === 'exit') {
+      if (decision.reason === 'max-restarts') {
+        logger.error(`Maximum restart attempts (${MAX_RESTARTS}) reached. Exiting.`);
+      }
+      process.exit(decision.exitCode);
+      return;
     }
 
-    if (restartRequested) {
-      restartAttempts = 0;
+    if (decision.reason === 'restart-flag') {
       logger.info('Restart flag detected. Restarting immediately.');
       setImmediate(start);
       return;
     }
 
-    if (code === 0) {
-      process.exit(0);
-      return;
-    }
-
-    restartAttempts += 1;
-    if (restartAttempts > MAX_RESTARTS) {
-      logger.error(`Maximum restart attempts (${MAX_RESTARTS}) reached. Exiting.`);
-      process.exit(code ?? 1);
-      return;
-    }
-
-    const delay = RESTART_DELAY * (2 ** (restartAttempts - 1));
     const reason = code !== 0 ? ` unexpectedly with code ${code ?? signal}` : '';
     logger.error(
-      `Bot exited${reason}. Restarting in ${delay / 1000}s (attempt ${restartAttempts}/${MAX_RESTARTS})...`,
+      `Bot exited${reason}. Restarting in ${decision.delayMs / 1000}s (attempt ${restartAttempts}/${MAX_RESTARTS})...`,
     );
-    setTimeout(start, delay);
+    setTimeout(start, decision.delayMs);
   };
 
   const start = () => {
