@@ -340,13 +340,33 @@ const sanitizeFileName = (name = '', fallback = 'file') => {
   return normalized || fallback;
 };
 
+const WINDOWS_RESERVED_BASENAMES = new Set([
+  'con',
+  'prn',
+  'aux',
+  'nul',
+  ...Array.from({ length: 9 }, (_, idx) => `com${idx + 1}`),
+  ...Array.from({ length: 9 }, (_, idx) => `lpt${idx + 1}`),
+]);
+
+const isWindowsReservedBasename = (value = '') => WINDOWS_RESERVED_BASENAMES.has(String(value).toLowerCase());
+
 const sanitizePathSegment = (name = '', fallback = 'file') => {
   const raw = String(name)
     .replace(/[\\/]+/g, '-')
     .replace(/\0/g, '')
     .trim();
   const base = path.basename(raw);
-  const normalized = base.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 128);
+  let normalized = base.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 128);
+
+  // Windows disallows trailing dots/spaces, and reserved device names (even with extensions).
+  normalized = normalized.replace(/[. ]+$/g, '');
+  const parsed = path.parse(normalized);
+  if (parsed.name && isWindowsReservedBasename(parsed.name)) {
+    normalized = `_${parsed.name}${parsed.ext}`.slice(0, 128);
+  }
+
+  normalized = normalized.replace(/[. ]+$/g, '');
   if (!normalized || normalized === '.' || normalized === '..') {
     return fallback;
   }
@@ -603,6 +623,8 @@ function ensureWebhookReplySupport(webhook) {
 function ensureDownloadServer() {
   if (!state.settings.LocalDownloadServer || ensureDownloadServer.server) return;
 
+  const host = state.settings.LocalDownloadServerHost || '0.0.0.0';
+
   const handler = (req, res) => {
     const [, token] = req.url.split('/');
     const filePath = downloadTokens.get(token);
@@ -621,47 +643,34 @@ function ensureDownloadServer() {
     stream.pipe(res);
   };
 
-  const start = (serverFactory) => {
-    try {
-      ensureDownloadServer.server = serverFactory()
-        .on('error', (err) => {
-          state.logger?.error(err);
-          ensureDownloadServer.server = null;
-        });
-    } catch (err) {
-      state.logger?.error(err);
-      ensureDownloadServer.server = null;
-    }
+  const handleServerError = (err) => {
+    state.logger?.error(err);
+    ensureDownloadServer.server = null;
   };
 
-  if (
-    state.settings.UseHttps &&
-    state.settings.HttpsKeyPath &&
-    state.settings.HttpsCertPath &&
-    fs.existsSync(state.settings.HttpsKeyPath) &&
-    fs.existsSync(state.settings.HttpsCertPath)
-  ) {
-    const options = {
-      key: fs.readFileSync(state.settings.HttpsKeyPath),
-      cert: fs.readFileSync(state.settings.HttpsCertPath),
-    };
-    start(() =>
-      https
-        .createServer(options, handler)
-        .listen(
-          state.settings.LocalDownloadServerPort,
-          '0.0.0.0',
-        )
+  try {
+    const shouldUseHttps = (
+      state.settings.UseHttps &&
+      state.settings.HttpsKeyPath &&
+      state.settings.HttpsCertPath &&
+      fs.existsSync(state.settings.HttpsKeyPath) &&
+      fs.existsSync(state.settings.HttpsCertPath)
     );
-  } else {
-    start(() =>
-      http
-        .createServer(handler)
-        .listen(
-          state.settings.LocalDownloadServerPort,
-          '0.0.0.0',
-        )
-    );
+
+    if (shouldUseHttps) {
+      const options = {
+        key: fs.readFileSync(state.settings.HttpsKeyPath),
+        cert: fs.readFileSync(state.settings.HttpsCertPath),
+      };
+      ensureDownloadServer.server = https.createServer(options, handler);
+    } else {
+      ensureDownloadServer.server = http.createServer(handler);
+    }
+
+    ensureDownloadServer.server.on('error', handleServerError);
+    ensureDownloadServer.server.listen(state.settings.LocalDownloadServerPort, host);
+  } catch (err) {
+    handleServerError(err);
   }
 }
 
