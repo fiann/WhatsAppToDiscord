@@ -41,21 +41,21 @@ jobs:
           npx esbuild src/runner.js \
             --bundle --platform=node --format=cjs \
             --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js \
-            --target=node22 --outfile=out.js
+            --target=node22 --outfile=out.cjs
 
-      - name: Run bundled watchdog smoke (out.js)
+      - name: Run bundled watchdog smoke (out.cjs)
         if: matrix.os == 'ubuntu-latest' && matrix.node == 22
         run: |
           tmp="$(mktemp -d)"
-          (cd "$tmp" && WA2DC_SMOKE_TEST=1 node "$GITHUB_WORKSPACE/out.js")
+          (cd "$tmp" && WA2DC_SMOKE_TEST=1 node "$GITHUB_WORKSPACE/out.cjs")
 
       - name: Build and smoke-test Windows packaged binary
         if: matrix.os == 'windows-latest' && matrix.node == 20
         shell: pwsh
         run: |
-          npx esbuild src/runner.js --bundle --platform=node --format=cjs --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js --target=node22 --outfile=out.js
+          npx esbuild src/runner.js --bundle --platform=node --format=cjs --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js --target=node22 --outfile=out.cjs
           New-Item -ItemType Directory -Force build | Out-Null
-          npx -y @yao-pkg/pkg out.js -t node22-win-x64 --options no-warnings --no-bytecode --public --public-packages "*" -o build/WA2DC.exe
+          npx -y @yao-pkg/pkg out.cjs -t node22-win-x64 --options no-warnings --no-bytecode --public --public-packages "*" -o build/WA2DC.exe
           $tmp = Join-Path $env:RUNNER_TEMP ("wa2dc-pkg-smoke-" + [System.Guid]::NewGuid().ToString("N"))
           New-Item -ItemType Directory -Force $tmp | Out-Null
           Push-Location $tmp
