@@ -333,7 +333,7 @@ const connectToWhatsApp = async (retry = 1) => {
         }
 
         if (state.settings.DiscordPrefix) {
-            const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
+            const prefix = state.settings.DiscordPrefixText || message.member.displayName || message.author.username;
             text = `*${prefix}*\n${text}`;
         }
 
@@ -412,7 +412,7 @@ const connectToWhatsApp = async (retry = 1) => {
             text = text.replace(/^@\S+\s*/, '');
         }
         if (state.settings.DiscordPrefix) {
-            const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
+            const prefix = state.settings.DiscordPrefixText || message.member.displayName || message.author.username;
             text = `*${prefix}*\n${text}`;
         }
         const editMentions = utils.whatsapp.getMentionedJids(text);
