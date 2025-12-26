@@ -855,7 +855,7 @@ const connectToWhatsApp = async (retry = 1) => {
         let composedText = stripped;
 
         if (state.settings.DiscordPrefix) {
-            const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
+            const prefix = state.settings.DiscordPrefixText || message.member?.displayName || message.author.username;
             composedText = stripped ? `*${prefix}*\n${stripped}` : `*${prefix}*`;
         }
 
