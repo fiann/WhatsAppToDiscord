@@ -1,22 +1,578 @@
 import discordJs from 'discord.js';
-import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, downloadContentFromMessage, prepareWAMessageMedia } from '@whiskeysockets/baileys';
 import readline from 'readline';
 import QRCode from 'qrcode';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import dns from 'dns';
+import net from 'net';
 import { pipeline } from 'stream/promises';
 import { pathToFileURL } from 'url';
 import http from 'http';
 import https from 'https';
 import childProcess from 'child_process';
+import * as linkPreview from 'link-preview-js';
+import { Agent } from 'undici';
 
 import state from './state.js';
+import storage from './storage.js';
 
-const { Webhook, MessageAttachment } = discordJs;
+const { Webhook, MessageAttachment, MessageActionRow, MessageButton, Constants: DiscordConstants } = discordJs;
+const { StickerFormatTypes } = DiscordConstants;
 
 const downloadTokens = new Map();
+const CUSTOM_EMOJI_REGEX = /<(a?):([a-zA-Z0-9_]{1,32}):(\d+)>/g;
+const GIF_URL_EXTENSION_REGEX = /\.(gif|mp4|webm)$/i;
+const GIF_PROVIDER_HINTS = ['tenor', 'giphy', 'imgur', 'gyazo'];
+const isKnownGifProvider = (value = '') => GIF_PROVIDER_HINTS.some((hint) => value.includes(hint));
+const MIME_BY_EXTENSION = {
+  gif: 'image/gif',
+  png: 'image/png',
+  apng: 'image/png',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+};
+const LINK_PREVIEW_FETCH_TIMEOUT_MS = 3000;
+const LINK_PREVIEW_MAX_REDIRECTS = 5;
+const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
+const LINK_PREVIEW_MAX_BYTES = 1024 * 1024; // 1 MiB
+const EXPLICIT_URL_REGEX = /<?https?:\/\/[^\s>]+>?/i;
+const BARE_URL_REGEX = /(?:^|[\s<])((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=+#]*)?)/i;
+const TRAILING_PUNCTUATION_REGEX = /[)\],.;!?]+$/;
+const UPDATE_BUTTON_IDS = {
+  APPLY: 'wa2dc:update',
+  SKIP: 'wa2dc:skip-update',
+};
+const ROLLBACK_BUTTON_ID = 'wa2dc:rollback';
+const resolveLinkPreviewFromContentFn = () => {
+  const candidates = [
+    linkPreview?.getPreviewFromContent,
+    linkPreview?.default?.getPreviewFromContent,
+    linkPreview?.['module.exports']?.getPreviewFromContent,
+  ];
+  return candidates.find((candidate) => typeof candidate === 'function') || null;
+};
+const getPreviewFromContentFn = resolveLinkPreviewFromContentFn();
+
+const normalizeHostname = (hostname = '') => hostname.replace(/\.$/, '').toLowerCase();
+
+const ipv4ToInt = (addr) => {
+  const parts = String(addr).split('.');
+  if (parts.length !== 4) return null;
+  const bytes = parts.map((part) => Number(part));
+  if (bytes.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) return null;
+  return (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+};
+
+const isPrivateIPv4Int = (value) => {
+  if (!Number.isInteger(value)) return true;
+  const unsigned = value >>> 0;
+  const first = unsigned >>> 24;
+  const second = (unsigned >>> 16) & 0xff;
+
+  if (first === 10) return true; // 10.0.0.0/8
+  if (first === 127) return true; // 127.0.0.0/8 (loopback)
+  if (first === 169 && second === 254) return true; // 169.254.0.0/16 (link-local)
+  if (first === 172 && second >= 16 && second <= 31) return true; // 172.16.0.0/12
+  if (first === 192 && second === 168) return true; // 192.168.0.0/16
+  if (first === 0) return true; // 0.0.0.0/8 (software)
+  return false;
+};
+
+const isBlockedIp = (address = '') => {
+  const ipVersion = net.isIP(address);
+  if (ipVersion === 4) {
+    const asInt = ipv4ToInt(address);
+    return isPrivateIPv4Int(asInt);
+  }
+  if (ipVersion === 6) {
+    const normalized = address.toLowerCase();
+    if (normalized === '::' || normalized === '::1') return true; // unspecified / loopback
+    if (normalized.startsWith('::ffff:')) {
+      const tail = normalized.slice('::ffff:'.length);
+      if (net.isIP(tail) === 4) return isBlockedIp(tail);
+    }
+    // fc00::/7 (unique local)
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
+    // fe80::/10 (link-local)
+    if (normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) return true;
+    // ff00::/8 (multicast)
+    if (normalized.startsWith('ff')) return true;
+    return false;
+  }
+  return false;
+};
+
+const isBlockedHostname = (hostname = '') => {
+  const normalized = normalizeHostname(hostname);
+  if (!normalized) return true;
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+  return false;
+};
+
+const pickSafeLookupResult = (results = [], familyPreference) => {
+  const filtered = results
+    .filter((entry) => entry && entry.address && !isBlockedIp(entry.address))
+    .filter((entry) => (familyPreference ? entry.family === familyPreference : true));
+  if (!filtered.length) return null;
+  const ipv4 = filtered.find((entry) => entry.family === 4);
+  return ipv4 || filtered[0];
+};
+
+const linkPreviewLookup = (hostname, options, callback) => {
+  Promise.resolve()
+    .then(async () => {
+      const normalized = normalizeHostname(hostname);
+      if (isBlockedHostname(normalized)) {
+        throw new Error('Blocked hostname');
+      }
+
+      const ipVersion = net.isIP(normalized);
+      const wantsAll = Boolean(options?.all);
+      if (ipVersion) {
+        if (isBlockedIp(normalized)) {
+          throw new Error('Blocked IP address');
+        }
+        const entry = { address: normalized, family: ipVersion };
+        return wantsAll ? [entry] : entry;
+      }
+
+      const family = options?.family === 4 || options?.family === 6 ? options.family : undefined;
+      const results = await dns.promises.lookup(normalized, { all: true, verbatim: true });
+      const filtered = results
+        .filter((entry) => entry && entry.address && !isBlockedIp(entry.address))
+        .filter((entry) => (family ? entry.family === family : true));
+      if (!filtered.length) {
+        throw new Error('No public IPs resolved for host');
+      }
+      if (wantsAll) {
+        return filtered;
+      }
+      const picked = pickSafeLookupResult(filtered);
+      if (!picked) {
+        throw new Error('No public IPs resolved for host');
+      }
+      return picked;
+    })
+    .then((picked) => {
+      if (Array.isArray(picked)) {
+        callback(null, picked);
+        return;
+      }
+      callback(null, picked.address, picked.family);
+    })
+    .catch((err) => callback(err));
+};
+
+const linkPreviewDispatcher = new Agent({
+  connect: { lookup: linkPreviewLookup },
+});
+
+const isSafeUrlForPreviewFetch = async (candidate) => {
+  if (!candidate) return false;
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return false;
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) return false;
+  if (url.username || url.password) return false;
+  const hostname = normalizeHostname(url.hostname);
+  if (isBlockedHostname(hostname)) return false;
+
+  const ipVersion = net.isIP(hostname);
+  if (ipVersion) {
+    return !isBlockedIp(hostname);
+  }
+
+  let results;
+  try {
+    results = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(results) || results.length === 0) return false;
+  return results.every((entry) => entry?.address && !isBlockedIp(entry.address));
+};
+
+const readBodyWithLimit = async (body, maxBytes) => {
+  if (!body || typeof body.getReader !== 'function') {
+    return Buffer.alloc(0);
+  }
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      // eslint-disable-next-line no-await-in-loop
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength || value.length || 0;
+      if (total > maxBytes) {
+        const err = new Error('Response too large');
+        err.code = 'WA2DC_PREVIEW_TOO_LARGE';
+        throw err;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+  }
+  return Buffer.concat(chunks, total);
+};
+
+const validatePreviewTargetUrl = (candidate = '') => {
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new Error('Invalid URL');
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('Unsupported URL protocol');
+  }
+  if (url.username || url.password) {
+    throw new Error('Blocked URL credentials');
+  }
+  if (isBlockedHostname(url.hostname)) {
+    throw new Error('Blocked hostname');
+  }
+  if (isBlockedIp(url.hostname)) {
+    throw new Error('Blocked IP address');
+  }
+  return url;
+};
+
+const fetchPreviewResponse = async (url, { maxBytes = LINK_PREVIEW_MAX_BYTES } = {}) => {
+  let currentUrl = url;
+  let redirects = 0;
+  const shouldFollowRedirect = createRedirectHandler();
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    validatePreviewTargetUrl(currentUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LINK_PREVIEW_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(currentUrl, {
+        dispatcher: linkPreviewDispatcher,
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: {
+          'user-agent': 'WA2DC-LinkPreview',
+          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      });
+
+      const status = Number(response.status) || 0;
+      if (status >= 300 && status < 400) {
+        const locationHeader = response.headers.get('location') || '';
+        if (!locationHeader) {
+          throw new Error('Redirect without location');
+        }
+        if (redirects >= LINK_PREVIEW_MAX_REDIRECTS) {
+          throw new Error('Too many redirects');
+        }
+        const forwardedUrl = new URL(locationHeader, currentUrl).toString();
+        if (!shouldFollowRedirect(currentUrl, forwardedUrl)) {
+          throw new Error('Redirect blocked');
+        }
+        currentUrl = forwardedUrl;
+        redirects += 1;
+        continue;
+      }
+
+      if (status < 200 || status >= 300) {
+        throw new Error(`Unexpected status ${status}`);
+      }
+
+      const headers = {};
+      response.headers.forEach((value, key) => {
+        headers[String(key).toLowerCase()] = value;
+      });
+
+      const contentLength = Number(headers['content-length']);
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        const err = new Error('Response too large');
+        err.code = 'WA2DC_PREVIEW_TOO_LARGE';
+        throw err;
+      }
+
+      let data = '';
+      const contentType = headers['content-type'] || '';
+      const treatAsText = !contentType
+        || /^text\//i.test(contentType)
+        || /html|xml|json/i.test(contentType);
+      if (treatAsText) {
+        const buffer = await readBodyWithLimit(response.body, maxBytes);
+        data = buffer.toString('utf8');
+      }
+
+      return {
+        url: currentUrl,
+        headers,
+        data,
+      };
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+        throw new Error('Request timeout');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
+
+const sanitizeFileName = (name = '', fallback = 'file') => {
+  const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
+  return normalized || fallback;
+};
+
+const WINDOWS_RESERVED_BASENAMES = new Set([
+  'con',
+  'prn',
+  'aux',
+  'nul',
+  ...Array.from({ length: 9 }, (_, idx) => `com${idx + 1}`),
+  ...Array.from({ length: 9 }, (_, idx) => `lpt${idx + 1}`),
+]);
+
+const isWindowsReservedBasename = (value = '') => WINDOWS_RESERVED_BASENAMES.has(String(value).toLowerCase());
+
+const sanitizePathSegment = (name = '', fallback = 'file') => {
+  const raw = String(name)
+    .replace(/[\\/]+/g, '-')
+    .replace(/\0/g, '')
+    .trim();
+  const base = path.basename(raw);
+  let normalized = base.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 128);
+
+  // Windows disallows trailing dots/spaces, and reserved device names (even with extensions).
+  normalized = normalized.replace(/[. ]+$/g, '');
+  const parsed = path.parse(normalized);
+  if (parsed.name && isWindowsReservedBasename(parsed.name)) {
+    normalized = `_${parsed.name}${parsed.ext}`.slice(0, 128);
+  }
+
+  normalized = normalized.replace(/[. ]+$/g, '');
+  if (!normalized || normalized === '.' || normalized === '..') {
+    return fallback;
+  }
+  return normalized;
+};
+
+const guessExtensionFromUrl = (url = '') => {
+  const match = url.match(/\.([a-z0-9]+)(?:[?#]|$)/i);
+  return match ? match[1].toLowerCase() : null;
+};
+
+const extensionToMime = (ext = '') => MIME_BY_EXTENSION[ext] || 'application/octet-stream';
+
+const isSupportedGifUrl = (url = '') => GIF_URL_EXTENSION_REGEX.test(url);
+
+const pickEmbedMediaUrl = (embed = {}) => {
+  const candidates = [
+    embed.video?.url,
+    embed.video?.proxyURL,
+    embed.image?.url,
+    embed.image?.proxyURL,
+    embed.thumbnail?.url,
+    embed.thumbnail?.proxyURL,
+  ].filter((candidate) => typeof candidate === 'string' && candidate.startsWith('http'));
+  if (!candidates.length) {
+    return null;
+  }
+  const supported = candidates.find((candidate) => isSupportedGifUrl(candidate));
+  return supported || candidates[0] || null;
+};
+
+const dedupeAttachments = (attachments = []) => {
+  const seen = new Set();
+  return attachments.filter((attachment) => {
+    const key = `${attachment?.url || ''}|${attachment?.name || ''}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+};
+
+const stripUrlDelimiters = (value = '') => value.replace(/^<+|>+$/g, '');
+const stripTrailingPunctuation = (value = '') => value.replace(TRAILING_PUNCTUATION_REGEX, '');
+
+const extractUrlCandidate = (text = '') => {
+  if (!text) {
+    return null;
+  }
+  const explicitMatch = text.match(EXPLICIT_URL_REGEX);
+  if (explicitMatch) {
+    return stripTrailingPunctuation(stripUrlDelimiters(explicitMatch[0]));
+  }
+  const bareMatch = text.match(BARE_URL_REGEX);
+  if (bareMatch) {
+    return stripTrailingPunctuation(bareMatch[1] || '');
+  }
+  return null;
+};
+
+const replaceFirstInstance = (text, search, replacement) => {
+  if (!text || !search) {
+    return text;
+  }
+  const index = text.indexOf(search);
+  if (index === -1) {
+    return text;
+  }
+  return `${text.slice(0, index)}${replacement}${text.slice(index + search.length)}`;
+};
+
+const normalizePreviewUrl = (value = '') => {
+  const trimmed = stripTrailingPunctuation(stripUrlDelimiters(value).trim());
+  if (!trimmed) {
+    return null;
+  }
+  const hasScheme = /^[a-z]+:/i.test(trimmed);
+  const candidate = hasScheme ? trimmed : `https://${trimmed}`;
+  try {
+    const url = new URL(candidate);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+};
+
+const hostWithoutWww = (hostname = '') => hostname.replace(/^www\./, '');
+
+const createRedirectHandler = () => {
+  let redirects = 0;
+  return (baseURL, forwardedURL) => {
+    if (redirects >= LINK_PREVIEW_MAX_REDIRECTS) {
+      return false;
+    }
+    try {
+      const baseHost = hostWithoutWww(new URL(baseURL).hostname || '');
+      const forwardedHost = hostWithoutWww(new URL(forwardedURL).hostname || '');
+      if (baseHost && forwardedHost && baseHost === forwardedHost) {
+        redirects += 1;
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+    return false;
+  };
+};
+
+const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) => {
+  if (typeof uploadImage !== 'function' || !imageUrl) {
+    return {};
+  }
+  const safeToFetch = await isSafeUrlForPreviewFetch(imageUrl).catch(() => false);
+  if (!safeToFetch) {
+    state.logger?.warn({ imageUrl }, 'Blocked link preview thumbnail fetch (SSRF protection)');
+    return {};
+  }
+  try {
+    const { imageMessage } = await prepareWAMessageMedia({ image: { url: imageUrl } }, {
+      upload: uploadImage,
+      mediaTypeOverride: 'thumbnail-link',
+      options: fetchOpts,
+    });
+    if (!imageMessage) {
+      return {};
+    }
+    const jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
+    return {
+      jpegThumbnail,
+      highQualityThumbnail: imageMessage,
+    };
+  } catch (err) {
+    state.logger?.warn({ err, imageUrl }, 'Failed to upload high quality thumbnail for preview');
+    return {};
+  }
+};
+
+const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
+  const matchedText = extractUrlCandidate(text);
+  if (!matchedText || !getPreviewFromContentFn) {
+    return undefined;
+  }
+  const normalizedUrl = normalizePreviewUrl(matchedText);
+  if (!normalizedUrl) {
+    return undefined;
+  }
+
+  let preview;
+  try {
+    const response = await fetchPreviewResponse(normalizedUrl);
+    preview = await getPreviewFromContentFn(response, {});
+  } catch (err) {
+    if (!err?.message?.includes('receive a valid response')) {
+      logger?.warn({ err, url: normalizedUrl }, 'Failed to fetch link preview');
+    }
+    return undefined;
+  }
+
+  if (!preview) {
+    return undefined;
+  }
+
+  const urlInfo = {
+    'canonical-url': preview.url || normalizedUrl,
+    'matched-text': matchedText,
+  };
+
+  if (preview.title) {
+    urlInfo.title = preview.title;
+  }
+  if (preview.description) {
+    urlInfo.description = preview.description;
+  }
+
+  const images = Array.isArray(preview.images) ? preview.images : [];
+  const firstImage = images.find((imageUrl) => {
+    if (typeof imageUrl !== 'string' || !imageUrl.startsWith('http')) return false;
+    try {
+      const url = new URL(imageUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) return false;
+      if (isBlockedHostname(url.hostname)) return false;
+      if (isBlockedIp(url.hostname)) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (firstImage) {
+    urlInfo.originalThumbnailUrl = firstImage;
+    if (!process.pkg && typeof uploadImage === 'function') {
+      const { jpegThumbnail, highQualityThumbnail } = await buildHighQualityThumbnail(firstImage, uploadImage, LINK_PREVIEW_FETCH_OPTS);
+      if (jpegThumbnail) {
+        urlInfo.jpegThumbnail = jpegThumbnail;
+      }
+      if (highQualityThumbnail) {
+        urlInfo.highQualityThumbnail = highQualityThumbnail;
+      }
+    }
+  }
+
+  return urlInfo;
+};
 
 function ensureWebhookReplySupport(webhook) {
   if (!webhook) return webhook;
@@ -67,6 +623,8 @@ function ensureWebhookReplySupport(webhook) {
 function ensureDownloadServer() {
   if (!state.settings.LocalDownloadServer || ensureDownloadServer.server) return;
 
+  const host = state.settings.LocalDownloadServerHost || '0.0.0.0';
+
   const handler = (req, res) => {
     const [, token] = req.url.split('/');
     const filePath = downloadTokens.get(token);
@@ -85,47 +643,34 @@ function ensureDownloadServer() {
     stream.pipe(res);
   };
 
-  const start = (serverFactory) => {
-    try {
-      ensureDownloadServer.server = serverFactory()
-        .on('error', (err) => {
-          state.logger?.error(err);
-          ensureDownloadServer.server = null;
-        });
-    } catch (err) {
-      state.logger?.error(err);
-      ensureDownloadServer.server = null;
-    }
+  const handleServerError = (err) => {
+    state.logger?.error(err);
+    ensureDownloadServer.server = null;
   };
 
-  if (
-    state.settings.UseHttps &&
-    state.settings.HttpsKeyPath &&
-    state.settings.HttpsCertPath &&
-    fs.existsSync(state.settings.HttpsKeyPath) &&
-    fs.existsSync(state.settings.HttpsCertPath)
-  ) {
-    const options = {
-      key: fs.readFileSync(state.settings.HttpsKeyPath),
-      cert: fs.readFileSync(state.settings.HttpsCertPath),
-    };
-    start(() =>
-      https
-        .createServer(options, handler)
-        .listen(
-          state.settings.LocalDownloadServerPort,
-          '0.0.0.0',
-        )
+  try {
+    const shouldUseHttps = (
+      state.settings.UseHttps &&
+      state.settings.HttpsKeyPath &&
+      state.settings.HttpsCertPath &&
+      fs.existsSync(state.settings.HttpsKeyPath) &&
+      fs.existsSync(state.settings.HttpsCertPath)
     );
-  } else {
-    start(() =>
-      http
-        .createServer(handler)
-        .listen(
-          state.settings.LocalDownloadServerPort,
-          '0.0.0.0',
-        )
-    );
+
+    if (shouldUseHttps) {
+      const options = {
+        key: fs.readFileSync(state.settings.HttpsKeyPath),
+        cert: fs.readFileSync(state.settings.HttpsCertPath),
+      };
+      ensureDownloadServer.server = https.createServer(options, handler);
+    } else {
+      ensureDownloadServer.server = http.createServer(handler);
+    }
+
+    ensureDownloadServer.server.on('error', handleServerError);
+    ensureDownloadServer.server.listen(state.settings.LocalDownloadServerPort, host);
+  } catch (err) {
+    handleServerError(err);
   }
 }
 
@@ -142,6 +687,12 @@ const updater = {
   isNode: process.argv0.replace('.exe', '').endsWith('node'),
 
   currentExeName: process.argv0.split(/[/\\]/).pop(),
+
+  get supportsSignedSelfUpdate() {
+    // Release signatures are required for safe self-updates. We currently do not
+    // ship signature files for some legacy releases.
+    return true;
+  },
 
   get channel() {
     const envChannel = process.env.WA2DC_UPDATE_CHANNEL?.toLowerCase();
@@ -182,11 +733,17 @@ const updater = {
     ) {
       return;
     }
-    fs.rm(`${this.currentExeName}.oldVersion`, { force: true }, () => 0);
+    const candidates = [
+      path.resolve(`${this.currentExeName}.oldVersion`),
+      path.join(path.dirname(process.execPath || ''), `${path.basename(process.execPath || this.currentExeName)}.oldVersion`),
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      fs.rm(candidate, { force: true }, () => 0);
+    }
   },
 
   async revertChanges() {
-    const currentPath = this.currentExeName;
+    const currentPath = process.execPath || path.resolve(this.currentExeName);
     const backupPath = `${currentPath}.oldVersion`;
 
     try {
@@ -304,7 +861,7 @@ const updater = {
     return signature;
   },
 
-  async validateSignature(signature, name) {
+  validateSignature(signature, name) {
     return crypto.verify(
       'RSA-SHA256',
       fs.readFileSync(name),
@@ -316,6 +873,10 @@ const updater = {
   async update(targetVersion = state.updateInfo?.version) {
     if (this.isNode) {
       state.logger?.info('Self-update is only available for packaged binaries.');
+      return false;
+    }
+    if (!this.supportsSignedSelfUpdate) {
+      state.logger?.info('Self-update is disabled on this platform (missing signed release artifacts).');
       return false;
     }
 
@@ -342,9 +903,23 @@ const updater = {
       await this.revertChanges();
       return false;
     }
+    if (os.platform() !== 'win32') {
+      try {
+        await fs.promises.chmod(currExeName, 0o755);
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to mark the updated binary as executable.');
+        await this.revertChanges();
+        return false;
+      }
+    }
 
     const signature = await this.downloadSignature(defaultExeName, targetVersion);
-    if (signature && !this.validateSignature(signature.result, currExeName)) {
+    if (!signature) {
+      state.logger?.error('Missing signature for the requested update. Reverting back.');
+      await this.revertChanges();
+      return false;
+    }
+    if (!this.validateSignature(signature.result, currExeName)) {
       state.logger?.error("Couldn't verify the signature of the updated binary, reverting back. Please update manually.");
       await this.revertChanges();
       return false;
@@ -354,13 +929,19 @@ const updater = {
   },
 
   async hasBackup() {
-    const backupPath = `${this.currentExeName}.oldVersion`;
-    try {
-      await fs.promises.access(backupPath, fs.constants.F_OK);
-      return true;
-    } catch (err) {
-      return false;
+    const candidates = [
+      path.resolve(`${this.currentExeName}.oldVersion`),
+      path.join(path.dirname(process.execPath || ''), `${path.basename(process.execPath || this.currentExeName)}.oldVersion`),
+    ].filter(Boolean);
+    for (const backupPath of candidates) {
+      try {
+        await fs.promises.access(backupPath, fs.constants.F_OK);
+        return true;
+      } catch {
+        /* try next */
+      }
     }
+    return false;
   },
 
   async rollback() {
@@ -393,7 +974,7 @@ const updater = {
     }
 
     const channel = this.channel;
-    const canSelfUpdate = !this.isNode;
+    const canSelfUpdate = !this.isNode && this.supportsSignedSelfUpdate;
 
     this.cleanOldVersion();
     const newVer = await this.fetchLatestVersion(channel);
@@ -444,10 +1025,10 @@ const updater = {
     ];
 
     if (updateInfo.canSelfUpdate) {
-      lines.push('Type `update` to apply or `skipUpdate` to ignore.');
+      lines.push('Use /update or the buttons below to install, or /skipupdate to ignore.');
     } else {
       lines.push(
-        'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart.'
+        'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart. Use Skip Update to dismiss this reminder.'
       );
     }
 
@@ -537,9 +1118,23 @@ const sqliteToJson = {
       state.logger?.error('Download failed! Please convert database manually.');
       return false;
     }
+    if (os.platform() !== 'win32') {
+      try {
+        await fs.promises.chmod(exeName, 0o755);
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to mark the database converter as executable.');
+        fs.unlinkSync(exeName);
+        return false;
+      }
+    }
 
     const signature = await this.downloadSignature(exeName);
-    if (signature && !updater.validateSignature(signature.result, exeName)) {
+    if (!signature) {
+      state.logger?.error("Couldn't fetch the signature of the database converter. Please convert database manually");
+      fs.unlinkSync(exeName);
+      return false;
+    }
+    if (!updater.validateSignature(signature.result, exeName)) {
       state.logger?.error("Couldn't verify the signature of the database converter. Please convert database manually");
       fs.unlinkSync(exeName);
       return false;
@@ -549,16 +1144,34 @@ const sqliteToJson = {
   },
 
   runStj(exeName) {
-    fs.mkdirSync(this._storageDir);
-    if (os.platform() !== 'win32') {
-      exeName = './' + exeName;
-    }
-    const child = childProcess.spawnSync(exeName, [this._dbPath, '"SELECT * FROM WA2DC"'], { shell: true });
+    fs.mkdirSync(this._storageDir, { recursive: true, mode: 0o700 });
+    const exePath = path.resolve(exeName);
 
-    const rows = child.stdout.toString().trim().split('\n');
-    for (let i = 0; i < rows.length; i++) {
-      const row = JSON.parse(rows[i]);
-      fs.writeFileSync(path.join(this._storageDir, row[0]), row[1])
+    const child = childProcess.spawnSync(exePath, [this._dbPath, 'SELECT * FROM WA2DC'], { shell: false });
+    if (child.error) {
+      throw child.error;
+    }
+    if (typeof child.status === 'number' && child.status !== 0) {
+      const stderr = child.stderr ? child.stderr.toString() : '';
+      throw new Error(`Database converter failed (exit ${child.status})${stderr ? `: ${stderr}` : ''}`);
+    }
+
+    const allowedKeys = new Set(['settings', 'chats', 'contacts', 'lastMessages', 'lastTimestamp']);
+    const raw = child.stdout ? child.stdout.toString().trim() : '';
+    if (!raw) {
+      return;
+    }
+
+    const rows = raw.split('\n');
+    for (const line of rows) {
+      if (!line) continue;
+      const row = JSON.parse(line);
+      const key = sanitizePathSegment(row?.[0] ?? '', '');
+      if (!key || !allowedKeys.has(key)) {
+        state.logger?.warn({ key: row?.[0] }, 'Skipping unexpected storage key during database migration');
+        continue;
+      }
+      fs.writeFileSync(path.join(this._storageDir, key), row?.[1] ?? '', { mode: 0o600 });
     }
   },
 
@@ -580,6 +1193,8 @@ const sqliteToJson = {
 }
 
 const discord = {
+  updateButtonIds: UPDATE_BUTTON_IDS,
+  rollbackButtonId: ROLLBACK_BUTTON_ID,
   channelIdToJid(channelId) {
     return Object.keys(state.chats).find((key) => state.chats[key].channelId === channelId);
   },
@@ -594,6 +1209,125 @@ const discord = {
       await channel.send(part);
     }
   },
+  stripCustomEmojiCodes(text = '') {
+    if (!text) return '';
+    return text.replace(CUSTOM_EMOJI_REGEX, ' ').replace(/  +/g, ' ');
+  },
+  ensureExplicitUrlScheme(text = '') {
+    const candidate = extractUrlCandidate(text);
+    if (!candidate) {
+      return { text, matched: null, normalized: null };
+    }
+    const normalized = normalizePreviewUrl(candidate);
+    if (!normalized || normalized === candidate) {
+      return { text, matched: candidate, normalized: normalized || candidate };
+    }
+    const variants = [candidate, `<${candidate}>`];
+    let updated = text;
+    for (const variant of variants) {
+      const next = replaceFirstInstance(updated, variant, normalized);
+      if (next !== updated) {
+        updated = next;
+        break;
+      }
+    }
+    return { text: updated, matched: candidate, normalized };
+  },
+  extractCustomEmojiData(message) {
+    const content = message?.content ?? '';
+    if (!content) {
+      return { matches: [], rawWithoutEmoji: '' };
+    }
+    const matches = [...content.matchAll(CUSTOM_EMOJI_REGEX)].map(([, animatedFlag, name, id]) => ({
+      animated: animatedFlag === 'a',
+      name,
+      id,
+    }));
+    const rawWithoutEmoji = content.replace(CUSTOM_EMOJI_REGEX, ' ');
+    return { matches, rawWithoutEmoji };
+  },
+  buildCustomEmojiAttachments(matches = []) {
+    if (!matches.length) return [];
+    const unique = new Map();
+    for (const entry of matches) {
+      if (!entry?.id || unique.has(entry.id)) continue;
+      const extension = entry.animated ? 'gif' : 'png';
+      unique.set(entry.id, {
+        url: `https://cdn.discordapp.com/emojis/${entry.id}.${extension}?quality=lossless`,
+        name: `${sanitizeFileName(entry.name || 'emoji', 'emoji')}-${entry.id}.${extension}`,
+        contentType: extensionToMime(extension),
+      });
+    }
+    return [...unique.values()];
+  },
+  _buildStickerAttachment(sticker) {
+    const id = sticker?.id;
+    if (!id) return null;
+    const format = sticker?.format;
+    let extension = 'png';
+    let baseUrl = `https://media.discordapp.net/stickers/${id}`;
+    if (format === StickerFormatTypes.GIF) {
+      extension = 'gif';
+    }
+    const url = `${baseUrl}.${extension}${extension === 'png' ? '?size=320' : ''}`;
+    return {
+      url,
+      name: `${sanitizeFileName(sticker?.name || 'sticker', 'sticker')}-${id}.${extension}`,
+      contentType: extensionToMime(extension),
+    };
+  },
+  collectStickerAttachments(message) {
+    const stickers = message?.stickers;
+    if (!stickers?.size) return [];
+    const attachments = [];
+    const seen = new Set();
+    for (const sticker of stickers.values()) {
+      if (!sticker || !sticker.id || seen.has(sticker.id)) continue;
+      const attachment = this._buildStickerAttachment(sticker);
+      if (attachment) {
+        seen.add(sticker.id);
+        attachments.push(attachment);
+      }
+    }
+    return attachments;
+  },
+  extractGifEmbedAttachments(message) {
+    const embeds = message?.embeds;
+    if (!Array.isArray(embeds) || !embeds.length) return [];
+    const attachments = [];
+    for (const embed of embeds) {
+      const mediaUrl = pickEmbedMediaUrl(embed);
+      if (!mediaUrl || !isSupportedGifUrl(mediaUrl)) continue;
+      const extension = guessExtensionFromUrl(mediaUrl) || 'gif';
+      const baseName = embed?.title || embed?.provider?.name || 'discord-gif';
+      const shareCandidate = (embed?.url || '').toLowerCase();
+      const providerCandidate = (embed?.provider?.name || '').toLowerCase();
+      const shouldConsumeUrl = isKnownGifProvider(shareCandidate) || isKnownGifProvider(providerCandidate);
+      attachments.push({
+        attachment: {
+          url: mediaUrl,
+          name: `${sanitizeFileName(baseName, 'discord-gif')}.${extension}`,
+          contentType: extensionToMime(extension),
+        },
+        sourceUrl: shouldConsumeUrl ? embed?.url : null,
+      });
+    }
+    return attachments;
+  },
+  collectMessageMedia(message, { includeEmojiAttachments = false, emojiMatches = [] } = {}) {
+    const baseAttachments = message?.attachments?.size ? [...message.attachments.values()] : [];
+    const stickerAttachments = this.collectStickerAttachments(message);
+    const gifEmbeds = this.extractGifEmbedAttachments(message);
+    const emojiAttachments = includeEmojiAttachments ? this.buildCustomEmojiAttachments(emojiMatches) : [];
+    const consumedUrls = gifEmbeds.map((entry) => entry.sourceUrl).filter(Boolean);
+    const combined = dedupeAttachments([
+      ...baseAttachments,
+      ...stickerAttachments,
+      ...gifEmbeds.map((entry) => entry.attachment),
+      ...emojiAttachments,
+    ]);
+    return { attachments: combined, consumedUrls };
+  },
   convertWhatsappFormatting(text = '') {
     if (!text) return text;
     let converted = text;
@@ -602,6 +1336,9 @@ const discord = {
     converted = converted.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, '*$1*');
     converted = converted.replace(/~(.+?)~/g, '~~$1~~');
     return converted;
+  },
+  async generateLinkPreview(text, { uploadImage, logger } = {}) {
+    return buildLinkPreviewInfo(text, { uploadImage, logger });
   },
   async getGuild() {
     return state.dcClient.guilds.fetch(state.settings.GuildID).catch((err) => { state.logger?.error(err) });
@@ -1055,15 +1792,200 @@ const discord = {
     }
     return channel;
   },
+  async _fetchUpdatePromptMessage() {
+    const ref = state.settings.UpdatePromptMessage;
+    if (!ref?.messageId) {
+      return null;
+    }
+    const channelId = ref.channelId || state.settings.ControlChannelID;
+    try {
+      const channel = await this.getChannel(channelId);
+      if (!channel) {
+        state.settings.UpdatePromptMessage = null;
+        return null;
+      }
+      const message = await channel.messages.fetch(ref.messageId);
+      return message;
+    } catch (err) {
+      state.logger?.debug?.({ err }, 'Failed to fetch stored update prompt message');
+      state.settings.UpdatePromptMessage = null;
+      return null;
+    }
+  },
+  async ensureUpdatePrompt(updateInfo) {
+    if (!updateInfo) {
+      await this.clearUpdatePrompt();
+      return;
+    }
+    const content = updater.formatUpdateMessage(updateInfo);
+    const components = [
+      new MessageActionRow().addComponents(
+        new MessageButton()
+          .setCustomId(UPDATE_BUTTON_IDS.APPLY)
+          .setLabel('Update')
+          .setStyle('PRIMARY')
+          .setDisabled(!updateInfo.canSelfUpdate),
+        new MessageButton()
+          .setCustomId(UPDATE_BUTTON_IDS.SKIP)
+          .setLabel('Skip update')
+          .setStyle('SECONDARY'),
+      ),
+    ];
+
+    let message = await this._fetchUpdatePromptMessage();
+    if (message) {
+      await message.edit({ content, components });
+      return;
+    }
+
+    const channel = await this.getControlChannel();
+    if (!channel) {
+      return;
+    }
+    message = await channel.send({ content, components });
+    state.settings.UpdatePromptMessage = {
+      channelId: channel.id,
+      messageId: message.id,
+    };
+    try {
+      await storage.save();
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to persist update prompt metadata');
+    }
+  },
+  async clearUpdatePrompt() {
+    const ref = state.settings.UpdatePromptMessage;
+    const hadStoredMessage = Boolean(ref);
+    if (ref?.messageId) {
+      const message = await this._fetchUpdatePromptMessage();
+      await message?.delete().catch(() => {});
+    }
+    state.settings.UpdatePromptMessage = null;
+    if (hadStoredMessage) {
+      try {
+        await storage.save();
+      } catch (err) {
+        state.logger?.warn({ err }, 'Failed to persist cleared update prompt metadata');
+      }
+    }
+  },
+  async syncUpdatePrompt() {
+    if (state.updateInfo) {
+      await this.ensureUpdatePrompt(state.updateInfo);
+    } else {
+      await this.clearUpdatePrompt();
+    }
+  },
+  async _fetchRollbackPromptMessage() {
+    const ref = state.settings.RollbackPromptMessage;
+    if (!ref?.messageId) {
+      return null;
+    }
+    const channelId = ref.channelId || state.settings.ControlChannelID;
+    try {
+      const channel = await this.getChannel(channelId);
+      if (!channel) {
+        state.settings.RollbackPromptMessage = null;
+        return null;
+      }
+      const message = await channel.messages.fetch(ref.messageId);
+      return message;
+    } catch (err) {
+      state.logger?.debug?.({ err }, 'Failed to fetch stored rollback prompt message');
+      state.settings.RollbackPromptMessage = null;
+      return null;
+    }
+  },
+  async ensureRollbackPrompt() {
+    if (updater.isNode) {
+      await this.clearRollbackPrompt();
+      return;
+    }
+    const hasBackup = await updater.hasBackup();
+    if (!hasBackup) {
+      await this.clearRollbackPrompt();
+      return;
+    }
+    const content = 'A backup of the previous version is available. Use the button below to roll back if you encounter issues.';
+    const components = [
+      new MessageActionRow().addComponents(
+        new MessageButton()
+          .setCustomId(ROLLBACK_BUTTON_ID)
+          .setLabel('Roll back')
+          .setStyle('DANGER'),
+      ),
+    ];
+    let message = await this._fetchRollbackPromptMessage();
+    if (message) {
+      await message.edit({ content, components });
+      return;
+    }
+    const channel = await this.getControlChannel();
+    if (!channel) {
+      return;
+    }
+    message = await channel.send({ content, components });
+    state.settings.RollbackPromptMessage = {
+      channelId: channel.id,
+      messageId: message.id,
+    };
+    try {
+      await storage.save();
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to persist rollback prompt metadata');
+    }
+  },
+  async clearRollbackPrompt() {
+    const ref = state.settings.RollbackPromptMessage;
+    const hadStoredMessage = Boolean(ref);
+    if (ref?.messageId) {
+      const message = await this._fetchRollbackPromptMessage();
+      await message?.delete().catch(() => {});
+    }
+    state.settings.RollbackPromptMessage = null;
+    if (hadStoredMessage) {
+      try {
+        await storage.save();
+      } catch (err) {
+        state.logger?.warn({ err }, 'Failed to persist cleared rollback prompt metadata');
+      }
+    }
+  },
+  async syncRollbackPrompt() {
+    if (updater.isNode) {
+      await this.clearRollbackPrompt();
+      return;
+    }
+    const hasBackup = await updater.hasBackup();
+    if (hasBackup) {
+      await this.ensureRollbackPrompt();
+    } else {
+      await this.clearRollbackPrompt();
+    }
+  },
   async findAvailableName(dir, fileName) {
-    let absPath;
-    let parsedFName = path.parse(fileName);
-    let counter = -1;
-    do {
-      absPath = path.resolve(dir, parsedFName.name + (counter === -1 ? "" : counter) + parsedFName.ext);
-      counter++;
-    } while (await fs.promises.stat(absPath).catch(() => false));
-    return [absPath, parsedFName.name + (counter === -1 ? "" : counter) + parsedFName.ext];
+    const safeName = sanitizePathSegment(fileName, 'file');
+    const parsed = path.parse(safeName);
+    const baseName = parsed.name || 'file';
+    const ext = parsed.ext || '';
+
+    let counter = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const suffix = counter === 0 ? '' : `-${counter}`;
+      const candidate = `${baseName}${suffix}${ext}`;
+      const absPath = path.resolve(dir, candidate);
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await fs.promises.stat(absPath);
+        counter += 1;
+      } catch (err) {
+        if (err?.code === 'ENOENT') {
+          return [absPath, candidate];
+        }
+        throw err;
+      }
+    }
   },
   async pruneDownloadsDir(ignorePath) {
     const limitGB = state.settings.DownloadDirLimitGB;
@@ -1103,7 +2025,7 @@ const discord = {
     }
   },
   async downloadLargeFile(file) {
-    await fs.promises.mkdir(state.settings.DownloadDir, { recursive: true });
+    await fs.promises.mkdir(state.settings.DownloadDir, { recursive: true, mode: 0o700 });
     const [absPath, fileName] = await this.findAvailableName(state.settings.DownloadDir, file.name);
     const writeFromDownloadCtx = async () => {
       const stream = await downloadContentFromMessage(
@@ -1111,16 +2033,16 @@ const discord = {
         file.msgType.replace('Message', ''),
         { logger: state.logger, reuploadRequest: state.waClient.updateMediaMessage },
       );
-      await pipeline(stream, fs.createWriteStream(absPath));
+      await pipeline(stream, fs.createWriteStream(absPath, { mode: 0o600 }));
     };
 
     try {
       if (typeof file.attachment?.pipe === 'function') {
-        await pipeline(file.attachment, fs.createWriteStream(absPath));
+        await pipeline(file.attachment, fs.createWriteStream(absPath, { mode: 0o600 }));
       } else if (file.downloadCtx) {
         await writeFromDownloadCtx();
       } else {
-        await fs.promises.writeFile(absPath, file.attachment);
+        await fs.promises.writeFile(absPath, file.attachment, { mode: 0o600 });
       }
     } catch (err) {
       // Retry once for transient network errors when we can recreate the stream.
@@ -1219,6 +2141,9 @@ const whatsapp = {
     }
     return flat.find(Boolean) || null;
   },
+  async generateLinkPreview(text, { uploadImage, logger } = {}) {
+    return discord.generateLinkPreview(text, { uploadImage, logger });
+  },
   getChatJidCandidates(rawMsg = {}) {
     const { key = {} } = rawMsg;
     const remoteJid = this.formatJid(
@@ -1290,7 +2215,12 @@ const whatsapp = {
     let preferred = this.formatJid(primary);
     let fallback = this.formatJid(alternate);
     if (preferred && fallback) {
-      this.migrateLegacyJid(fallback, preferred);
+      const phone = this.isPhoneJid(preferred) ? preferred : (this.isPhoneJid(fallback) ? fallback : null);
+      const lid = this.isLidJid(preferred) ? preferred : (this.isLidJid(fallback) ? fallback : null);
+      if (phone && lid) {
+        this.migrateLegacyJid(lid, phone);
+        return [phone, lid];
+      }
       return [preferred, fallback];
     }
 
@@ -1303,15 +2233,15 @@ const whatsapp = {
       if (!fallback && this.isLidJid(preferred) && typeof store.getPNForLID === 'function') {
         const pnJid = this.formatJid(await store.getPNForLID(preferred));
         if (pnJid) {
-          fallback = pnJid;
-          this.migrateLegacyJid(pnJid, preferred);
+          fallback = preferred;
+          preferred = pnJid;
+          this.migrateLegacyJid(fallback, preferred);
         }
       } else if (!fallback && this.isPhoneJid(preferred) && typeof store.getLIDForPN === 'function') {
         const lidJid = this.formatJid(await store.getLIDForPN(preferred));
         if (lidJid) {
-          this.migrateLegacyJid(preferred, lidJid);
-          fallback = preferred;
-          preferred = lidJid;
+          fallback = lidJid;
+          this.migrateLegacyJid(lidJid, preferred);
         }
       }
     } catch (err) {
@@ -1475,7 +2405,25 @@ const whatsapp = {
     return ts > state.startTime || id == null || !Object.prototype.hasOwnProperty.call(state.lastMessages, id);
   },
   getMessageType(rawMsg) {
-    return ['conversation', 'extendedTextMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'documentWithCaptionMessage', 'viewOnceMessageV2', 'stickerMessage', 'editedMessage'].find((el) => Object.hasOwn(rawMsg.message || {}, el));
+    return [
+      'conversation',
+      'extendedTextMessage',
+      'imageMessage',
+      'videoMessage',
+      'audioMessage',
+      'documentMessage',
+      'documentWithCaptionMessage',
+      'viewOnceMessageV2',
+      'stickerMessage',
+      'editedMessage',
+      'pollCreationMessage',
+      'pollCreationMessageV2',
+      'pollCreationMessageV3',
+      'pollCreationMessageV4',
+      'pollUpdateMessage',
+      'pollResultSnapshotMessage',
+      'pinInChatMessage',
+    ].find((el) => Object.hasOwn(rawMsg.message || {}, el));
   },
   _profilePicsCache: {},
   async getProfilePic(rawMsg) {
@@ -1513,6 +2461,25 @@ const whatsapp = {
       case 'stickerMessage':
         content += msg.caption || '';
         break;
+      case 'pollCreationMessage':
+      case 'pollCreationMessageV2':
+      case 'pollCreationMessageV3':
+      case 'pollCreationMessageV4': {
+        const options = Array.isArray(msg.options) ? msg.options : [];
+        const optionText = options.map((opt, idx) => `${idx + 1}. ${opt.optionName || 'Option'}`).join('\n');
+        const selectable = msg.selectableOptionsCount || msg.selectableCount;
+        content += `Poll: ${msg.name || 'Untitled poll'}`;
+        if (selectable && selectable > 1) {
+          content += ` (select up to ${selectable})`;
+        }
+        if (optionText) {
+          content += `\n${optionText}`;
+        }
+        break;
+      }
+      case 'pinInChatMessage':
+        content += 'Pinned a message';
+        break;
     }
     const contextInfo = typeof msg === 'object' && msg !== null ? msg.contextInfo : undefined;
     const mentions = contextInfo?.mentionedJid || [];
@@ -1532,16 +2499,26 @@ const whatsapp = {
         || contact?.notify
         || contact?.pushName;
       if (!name) continue;
-      const preferredId = this.formatJid(contact?.id);
-      let alternateId = null;
-      if (contact?.phoneNumber) {
-        alternateId = this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`);
-      } else if (contact?.lid) {
-        alternateId = this.formatJid(contact.lid);
-      }
-      if (preferredId && alternateId) {
+      const id = this.formatJid(contact?.id);
+      const pnFromField = contact?.phoneNumber
+        ? this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`)
+        : null;
+      const pnFromId = id && this.isPhoneJid(id) ? id : null;
+      const lidFromField = contact?.lid ? this.formatJid(contact.lid) : null;
+      const lidFromId = id && this.isLidJid(id) ? id : null;
+
+      const pnJid = pnFromField || pnFromId;
+      const lidJid = lidFromField || lidFromId;
+
+      const preferredId = pnJid || id || lidJid;
+      const alternateId = preferredId === pnJid
+        ? (lidJid && lidJid !== preferredId ? lidJid : (id && id !== preferredId ? id : null))
+        : (pnJid && pnJid !== preferredId ? pnJid : (lidJid && lidJid !== preferredId ? lidJid : null));
+
+      if (preferredId && alternateId && this.isPhoneJid(preferredId) && this.isLidJid(alternateId)) {
         this.migrateLegacyJid(alternateId, preferredId);
       }
+
       const targetId = preferredId || alternateId;
       if (!targetId) continue;
       state.waClient.contacts[targetId] = name;

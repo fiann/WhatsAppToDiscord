@@ -1,0 +1,77 @@
+name: Feature request
+description: Suggest an idea or improvement for WA2DC
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion!
+
+        Before filing, please check the docs and existing issues to avoid duplicates:
+        - Docs: https://arespawn.github.io/WhatsAppToDiscord/
+        - Issues: https://github.com/arespawn/WhatsAppToDiscord/issues
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve? Who is affected and why?
+      placeholder: "It's hard to do X because..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should WA2DC do? Include behavior details or UX/UI expectations if relevant.
+      placeholder: "Add/change Y so that..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_cases
+    attributes:
+      label: Use cases / examples
+      description: Concrete examples help a lot. What would you do step-by-step?
+      placeholder: |
+        - Scenario 1: ...
+        - Scenario 2: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: Any other solutions/workarounds you considered?
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope / edge cases (optional)
+      description: Any constraints, edge cases, or backwards-compatibility concerns we should consider?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: willingness
+    attributes:
+      label: Are you willing to help implement this?
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context (optional)
+      description: Mockups, screenshots, links, related issues, etc.
+    validations:
+      required: false

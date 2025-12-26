@@ -1,254 +1,187 @@
 # Commands
-All commands are now available as slash commands anywhere in your server. Responses are ephemeral outside `#control-room`, but they post publicly when used inside the control room. Legacy text commands in `#control-room` still work for compatibility. Use Discord integration permissions to manage who can run these commands.
 
-## pairWithCode
-Pairing with your phone number
-- Format: `pairWithCode <number with country code>`
-- Examples:
-    - `pairWithCode 18001231234`: This would give you a code for you to enter on your phone and pair the bot with your phone number.
+All bot controls now run exclusively through Discord slash commands. Type `/` in any channel to see the available commands (the bot must share the server) or narrow the list by typing `/wa` and selecting the desired action. Commands can be invoked anywhere, but responses are ephemeral outside the control channel. The legacy `#control-room` text commands have been removed—use slash commands or the persistent buttons in the control channel.
 
-## start
-Starts a new conversation. It can be used with a name or a phone number.
-- Format: `start <number with country code or name>`
-- Examples:
-    - `start 11231231234`: This would start a conversation with +1 123 123 1234.
-    - `start John Doe`: This would start a conversation with John Doe. It has to be in your contacts.
+---
 
-## link
-Links an existing Discord text channel to a WhatsApp conversation without creating a new channel.
-- Format: `link <number with country code or name> #<channel name> [--force|-f]`
-- Examples:
-    - `link 11231231234 #existing-chat`: This would connect the WhatsApp conversation with +1 123 123 1234 to the mentioned Discord channel.
-    - `link John Doe #team-chat`: This would connect the WhatsApp conversation with John Doe to the mentioned Discord channel.
-- Tips:
-    - Add `--force` (or `-f`) to override a Discord channel that's already linked to a different WhatsApp conversation.
+## Conversation Management
 
-## move
-Moves an existing WhatsApp link (and its webhook) from one Discord channel to another without editing files manually.
-- Format: `move #<current channel> #<new channel> [--force|-f]`
-- Examples:
-    - `move #duplicate-channel #original-room --force`: This reassigns the WhatsApp chat that is currently writing in `#duplicate-channel` so it posts in `#original-room` instead (and deletes the redundant webhook).
-- Tips:
-    - Use `--force` (or `-f`) when the destination channel is already linked to some other WhatsApp conversation.
+### `/pairwithcode`
+Request a pairing code for a specific phone number.  
+Usage: `/pairwithcode number:<E.164 phone number>`
 
-## list
-Lists your contacts and groups.
-- Format: `list <optional chat name to search>`
-- Examples:
-    - `list`: This would list all of your contacts and groups.
-    - `list John`: This would list all of your contacts and groups that contain "John" in their name.
+### `/start`
+Create a brand-new WhatsApp conversation and channel link.  
+Usage: `/start contact:<phone number or saved contact name>`
 
-## listWhitelist
-Shows all the whitelisted conversations. If no channel is whitelisted, the whitelist is disabled, meaning every message will be sent to Discord.
-- Format: `listWhitelist`
+### `/link`
+Link an existing Discord text/news channel to an existing WhatsApp chat without creating anything new.  
+Usage: `/link contact:<name or number> channel:<#channel> force:<true|false>`  
+Enable `force` to override a channel that is already linked to another chat.
 
-## addToWhitelist
-Adds the given channel to the whitelist.
-- Format: `addToWhitelist #<channel name>`
-- Examples:
-    - `addToWhitelist #john-doe`: This would add John Doe to the whitelist, allowing them to send you a message if you have whitelist enabled.
+### `/move`
+Move an existing WhatsApp link (and webhook) from one channel to another.  
+Usage: `/move from:<#current-channel> to:<#new-channel> force:<true|false>`
 
-## removeFromWhitelist
-Removes the given channel from the whitelist.
-- Format: `removeFromWhitelist #<channel name>`
-- Examples:
-    - `removeFromWhitelist #john-doe`: This would remove John Doe from the whitelist, preventing them to send you a message if you have whitelist enabled.
+### `/list`
+List all known contacts and groups, optionally filtered.  
+Usage: `/list query:<optional text>`
 
-## resync
-Re-syncs your contacts and groups. Can optionally rename the Discord channels to match WhatsApp names.
-- Format: `resync [rename]`
+### `/poll`
+Create a WhatsApp poll from Discord.  
+Usage: `/poll question:"text" options:"opt1,opt2,..." select:<count> announcement:<true|false>`  
+Notes: Poll messages and live vote updates are mirrored to Discord, voting can only be done directly in WhatsApp.
 
-## enableWAUpload
-When enabled (enabled by default), the files received from Discord will be uploaded to WhatsApp, instead of providing a link to the attachment. File uploads takes longer and consumes more data.
-- Format: `enableWAUpload`
+### `/setpinduration`
+Set the default expiration time (24h, 7d, or 30d) for WhatsApp pins created from Discord.  
+Usage: `/setpinduration duration:<24h|7d|30d>`
 
-## disableWAUpload
-When disabled (enabled by default), the files received from Discord will be sent as links to WhatsApp, instead of uploading them as a file. Providing links takes shorter and consumes less data.
-- Format: `disableWAUpload`
+---
 
-## setDCPrefix
-When set (your username by default), the prefix will be added in bold followed by a newline to messages sent to WhatsApp from Discord.
-- Format: `setDCPrefix`
+## Whitelist Controls
 
-## enableDCPrefix
-When enabled (disabled by default), your Discord username will be added in bold followed by a newline to messages sent to WhatsApp from Discord.
-- Format: `enableDCPrefix`
+### `/listwhitelist`
+Show the conversations currently allowed to bridge when the whitelist is enabled.
 
-## disableDCPrefix
-When disabled (disabled by default), your Discord username won't be added in bold followed by a newline to messages sent to WhatsApp from Discord.
-- Format: `disableDCPrefix`
+### `/addtowhitelist`
+Add a linked channel to the whitelist.  
+Usage: `/addtowhitelist channel:<#channel>`
 
-## enableWAPrefix
-When enabled (disabled by default), WhatsApp names will be added to messages sent to Discord from WhatsApp. (Note that the bot already sets the username to the message sender's name)
-- Format: `enableWAPrefix`
+### `/removefromwhitelist`
+Remove a linked channel from the whitelist.  
+Usage: `/removefromwhitelist channel:<#channel>`
 
-## disableWAPrefix
-When disabled (disabled by default), WhatsApp names won't be added to messages sent to Discord from WhatsApp. (Note that the bot already sets the username to the message sender's name)
-- Format: `disableWAPrefix`
+---
 
-## enableDeletes
-When enabled (enabled by default), deleting a message on one platform removes it from the other.
-- Format: `enableDeletes`
+## Formatting & Prefixes
 
-## disableDeletes
-When disabled, deleting a message on one platform will not affect the other, keeping the history.
-- Format: `disableDeletes`
+### `/setdcprefix`
+Override the prefix prepended to Discord → WhatsApp messages.  
+Usage: `/setdcprefix prefix:<optional text>` (omit to reset to usernames)
 
-## enableReadReceipts
-Enables read receipts so you are notified when WhatsApp users read your messages.
-- Format: `enableReadReceipts`
+### `/enabledcprefix` / `/disabledcprefix`
+Toggle whether the configured prefix is used.
 
-## disableReadReceipts
-Disables read receipts.
-- Format: `disableReadReceipts`
+### `/enablewaprefix` / `/disablewaprefix`
+Toggle whether WhatsApp sender names are prepended inside Discord messages.
 
-Only one delivery style can be active at a time. Use the following commands to switch between DM, public reply, or reaction-based read receipts. Webhook-authored Discord messages always receive a ☑️ reaction whenever read receipts are enabled so they can be acknowledged without sending DMs.
+---
 
-## dmReadReceipts
-Sends read receipts as direct messages to the original Discord author instead of in the channel.
-- Format: `dmReadReceipts`
+## Attachments & Downloads
 
-## publicReadReceipts
-Posts a short reply in the channel when a WhatsApp message is read (auto-deletes after a few seconds).
-- Format: `publicReadReceipts`
+### `/enablewaupload` / `/disablewaupload`
+Toggle whether Discord attachments are uploaded to WhatsApp (vs sending as links).
 
-## reactionReadReceipts
-Adds a ☑️ reaction to the original Discord message when the WhatsApp user reads it.
-- Format: `reactionReadReceipts`
+### `/enablelocaldownloads` / `/disablelocaldownloads`
+Control whether large WhatsApp attachments are downloaded locally when they exceed Discord’s upload limit.
 
-## enableLocalDownloads
-When enabled, the bot downloads files larger than Discord's upload limit (default 8MB) to your download location. See `getDownloadDir` for your download location.
-- Format: `enableLocalDownloads`
+### `/getdownloadmessage`
+Show the current local-download notification template.
 
-## disableLocalDownloads
-When enabled, the bot notifies you about receiving a file larger than Discord's upload limit.
-- Format: `disableLocalDownloads`
+### `/setdownloadmessage`
+Update the notification template.  
+Usage: `/setdownloadmessage message:"text with {url}/{fileName}/..."`.
 
-## getDownloadMessage
-Prints out the download message. This message is printed when you receive a file larger than Discord's upload limit and it is downloaded.
-- Format: `getDownloadMessage`
-- Default: *"Downloaded a file larger than the upload limit, check it out at {url}"*
+### `/getdownloaddir`
+Show the folder used for downloaded files.
 
-## setDownloadMessage
-Prints out the download message. This message is printed when you receive a file larger than Discord's upload limit and it is downloaded. There are keywords that you can use, `{abs}`: Downloaded file's absolute path, `{resolvedDownloadDir}`: Download directory's resolved path, `{downloadDir}`: unedited download directory, `{fileName}`: Downloaded file's name, `{url}`: Downloaded file's URL.
-- Format: `setDownloadMessage <your message here>`
-- Examples:
-    - `setDownloadMessage Received a file. The file name is {fileName}`
-    - `setDownloadMessage Received a file. Download it from {url}`
-    - `setDownloadMessage Received a file. Information: Absolute path: {abs}, Resolved download directory: {resolvedDownloadDir}, Download directory: {downloadDir}, Filename: {fileName}, URL: {url}`
+### `/setdownloaddir`
+Change the download directory.  
+Usage: `/setdownloaddir path:<folder>`
 
-## getDownloadDir
-Prints out the download directory.
-- Format: `getDownloadDir`
-- Default: `./downloads`: This means the bot will save files to the downloads folder inside bot's folder.
+### `/setdownloadlimit`
+Limit the download directory size (GB).  
+Usage: `/setdownloadlimit size:<number>`
 
-## setDownloadDir
-Sets the download directory.
-- Format: `setDownloadDir <desired save path>`
-- Examples:
-    - `setDownloadDir C:\Users\<your username>\Downloads`: Downloads files to your usual Windows downloads folder
-    - `setDownloadDir ./downloads`: Downloads files to Downloads folder in your bot's location.
+### `/setfilesizelimit`
+Override the Discord upload size limit used to decide when to download instead of re-uploading.  
+Usage: `/setfilesizelimit bytes:<integer>`
 
-## setDownloadLimit
-Sets the maximum size for the download directory in gigabytes. Older files are removed when the limit is exceeded.
-- Format: `setDownloadLimit <gigabytes>`
-- Default: `0` (unlimited)
+### `/enablelocaldownloadserver` / `/disablelocaldownloadserver`
+Start/stop the built-in HTTP(S) server that serves downloaded files.
 
-## setFileSizeLimit
-Changes the file size limit used to decide when to download files locally instead of uploading to Discord. Useful for servers with Nitro.
-- Format: `setFileSizeLimit <bytes>`
-- Default: `8388608`
+### `/setlocaldownloadserverhost`
+Configure the hostname used in generated download URLs.  
+Usage: `/setlocaldownloadserverhost host:<value>`
 
-## enableLocalDownloadServer
-Starts a small web server to serve locally downloaded files and makes `{url}` links accessible over HTTP.
-- Format: `enableLocalDownloadServer`
+### `/setlocaldownloadserverport`
+Configure which port the download server listens on.  
+Usage: `/setlocaldownloadserverport port:<1-65535>`
 
-## disableLocalDownloadServer
-Stops the local download server.
-- Format: `disableLocalDownloadServer`
+### `/enablehttpsdownloadserver` / `/disablehttpsdownloadserver`
+Toggle HTTPS for the download server (requires certificates).
 
-## setLocalDownloadServerHost
-Sets the hostname used in generated download URLs.
-- Format: `setLocalDownloadServerHost <host>`
-- Default: `localhost`
+### `/sethttpscert`
+Set TLS certificate paths for the download server.  
+Usage: `/sethttpscert key_path:<file> cert_path:<file>`
 
-## setLocalDownloadServerPort
-Sets the port for the download server.
-- Format: `setLocalDownloadServerPort <port>`
-- Default: `8080`
+---
 
-## enableHttpsDownloadServer
-Serves downloads over HTTPS instead of HTTP. Requires certificate files to be configured.
-- Format: `enableHttpsDownloadServer`
+## Messaging Behavior
 
-## disableHttpsDownloadServer
-Disables HTTPS for the download server and serves files over HTTP.
-- Format: `disableHttpsDownloadServer`
+### `/enabledeletes` / `/disabledeletes`
+Toggle mirrored message deletions between Discord and WhatsApp.
 
-## setHttpsCert
-Sets the paths for the TLS private key and certificate used by the HTTPS download server.
-- Format: `setHttpsCert <key path> <cert path>`
+### `/enablereadreceipts` / `/disablereadreceipts`
+Turn read receipts on or off entirely.
 
-## enablePublishing
-Enables publishing messages sent to news channels automatically. By default, the bot won't notify news channel followers. With this option, you can send the message to the channel followers.
-- Format: `enablePublishing`
+### `/dmreadreceipts`, `/publicreadreceipts`, `/reactionreadreceipts`
+Pick the delivery style when read receipts are enabled (DM, short channel reply, or ☑️ reaction).
 
-## disablePublishing
-Disables publishing messages sent to news channels automatically.
-- Format: `disablePublishing`
+### `/enablechangenotifications` / `/disablechangenotifications`
+Toggle profile-picture / status-change alerts.
 
-## enableChangeNotifications
-Enables profile picture change and status update notifications.
-- Format: `enableChangeNotifications`
+### `/oneway`
+Restrict the bridge to one direction or keep it bidirectional.  
+Usage: `/oneway direction:<discord|whatsapp|disabled>`
 
-## disableChangeNotifications
-Disables profile picture change and status update notifications.
-- Format: `disableChangeNotifications`
+### `/redirectwebhooks`
+Allow or block Discord webhook messages from being forwarded to WhatsApp.  
+Usage: `/redirectwebhooks enabled:<true|false>`
 
-## oneWay
-Turns on one-way communication.
-- Format: `oneWay <discord|whatsapp|disabled>`
-- Examples:
-    - `oneWay discord`: would only send messages coming from WhatsApp to Discord, but not the other way.
+### `/ping`
+Return the current bot latency.
 
-## autoSaveInterval
-Changes the auto save interval to the number of seconds you provide.
-- Format: `autoSaveInterval <seconds>`
-- Example: `autoSaveInterval 60`
+---
 
-## lastMessageStorage
-Changes the last message storage size to the number provided. This determines how many recent messages you can edit, delete, react to, or reply to. A value of 1000 would mean you can interact with the last 1000 messages received or sent.
-- Format: `lastMessageStorage <size>`
-- Example: `lastMessageStorage 1000`
+## Maintenance & Settings
 
-## redirectWebhooks
-Allows sending webhook messages to be redirected to WhatsApp.
-- Format: `redirectWebhooks <yes|no>`
-- Examples:
-    - `redirectWebhooks yes`: Would redirect webhook messages to WhatsApp.
-    - `redirectWebhooks no`: Would not redirect webhook messages to WhatsApp.
+### `/resync`
+Re-sync WhatsApp contacts/groups. Set `rename:true` to rename Discord channels to match WhatsApp subjects.
 
-## ping
-Replies back with *"Pong <Now - Time Message Sent>"ms*. It basically shows the bot's ping with the server. An unsynced date and time on your computer may cause big or even negative ping results, however, it doesn't mean you got negative ping or 10mins of lag, rather it is the Discord's time and your computer's time difference plus your ping.
-- Format: `ping`
+### `/autosaveinterval`
+Change how often the bot persists state (seconds).  
+Usage: `/autosaveinterval seconds:<integer>`
 
-## update
-Downloads and installs the latest version when running a packaged binary. Docker/source installs will still post the release link and changelog but expect you to pull the new image and restart manually.
-- Format: `update`
+### `/lastmessagestorage`
+Limit how many WhatsApp messages remain editable/deletable from Discord.  
+Usage: `/lastmessagestorage size:<integer>`
 
-## updateChannel
-Switches between the `stable` and `unstable` release channels for update notifications.
-- Format: `updateChannel <stable|unstable>`
-- Example: `updateChannel unstable`
+### `/enablelocaldownloadserver`, `/disablelocaldownloadserver`, `/enablehttpsdownloadserver`, `/disablehttpsdownloadserver`
+See “Attachments & Downloads” above (listed again here for visibility).
 
-## checkUpdate
-Manually checks if a new version is available on the configured channel (`WA2DC_UPDATE_CHANNEL`, defaults to `stable`) and posts the result in the control channel.
-- Format: `checkUpdate`
+---
 
-## skipUpdate
-Clears the current update notification without installing anything.
-- Format: `skipUpdate`
+## Update Management
 
-## rollback
-Rolls back to the previous packaged binary if one is available (requires packaged install).
-- Format: `rollback`
+The control channel now shows a persistent update card with “Update”, “Skip update”, and “Roll back” buttons that survive restarts. These buttons trigger the same slash commands listed below.
+
+### `/updatechannel`
+Switch between the stable and unstable release channels.  
+Usage: `/updatechannel channel:<stable|unstable>`
+
+### `/checkupdate`
+Manually check for updates on the active channel.
+
+### `/skipupdate`
+Dismiss the current update notification without installing.
+
+### `/update`
+Download and install the available release (packaged installs only). Docker/source deployments will be reminded to pull and restart manually.
+
+### `/rollback`
+Restore the previous packaged binary when one is available. The dedicated “Roll back” button only appears if a backup exists.
+
+---
+
+Need help remembering the command names? Type `/wa` inside Discord and let the client autocomplete each slash command along with its required options. All commands are self-documented via Discord’s UI, so you no longer have to memorize legacy text formats.

@@ -9,6 +9,7 @@ build/
 *.bat
 storage/
 out.js
+out.cjs
 .env
 .vscode/settings.json
 __pycache__/

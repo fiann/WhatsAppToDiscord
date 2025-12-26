@@ -8,30 +8,57 @@ on:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [20, 22, 24, 25]
+        exclude:
+          - os: windows-latest
+            node: 22
+          - os: windows-latest
+            node: 24
+          - os: windows-latest
+            node: 25
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install Node dependencies
         run: npm ci
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
+      - name: Run Node unit tests
+        run: npm test
 
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
+      - name: Bundle with esbuild (release smoke)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: |
+          npx esbuild src/runner.js \
+            --bundle --platform=node --format=cjs \
+            --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js \
+            --target=node22 --outfile=out.cjs
 
-      - name: Run unit and integration tests
-        run: pytest -q
+      - name: Run bundled watchdog smoke (out.cjs)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: |
+          tmp="$(mktemp -d)"
+          (cd "$tmp" && WA2DC_SMOKE_TEST=1 node "$GITHUB_WORKSPACE/out.cjs")
 
-      - name: Run smoke boot test
-        env:
-          WA2DC_SMOKE_TEST: '1'
-        run: node src/index.js
+      - name: Build and smoke-test Windows packaged binary
+        if: matrix.os == 'windows-latest' && matrix.node == 20
+        shell: pwsh
+        run: |
+          npx esbuild src/runner.js --bundle --platform=node --format=cjs --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js --target=node22 --outfile=out.cjs
+          New-Item -ItemType Directory -Force build | Out-Null
+          npx -y @yao-pkg/pkg out.cjs -t node22-win-x64 --options no-warnings --no-bytecode --public --public-packages "*" -o build/WA2DC.exe
+          $tmp = Join-Path $env:RUNNER_TEMP ("wa2dc-pkg-smoke-" + [System.Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          Push-Location $tmp
+          $env:WA2DC_SMOKE_TEST = "1"
+          & (Join-Path $env:GITHUB_WORKSPACE "build\\WA2DC.exe")
+          Pop-Location

@@ -4,11 +4,18 @@ import fs from 'fs';
 import state from './state.js';
 import utils from './utils.js';
 import storage from './storage.js';
+import groupMetadataCache from './groupMetadataCache.js';
+import messageStore from './messageStore.js';
 import { createDiscordClient } from './clientFactories.js';
 
-const { Intents, Constants } = discordJs;
+const { Intents, Constants, MessageActionRow, MessageButton } = discordJs;
 
 const DEFAULT_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
+const PIN_DURATION_PRESETS = {
+  '24h': 24 * 60 * 60,
+  '7d': 7 * 24 * 60 * 60,
+  '30d': 30 * 24 * 60 * 60,
+};
 
 const client = createDiscordClient({
   intents: [
@@ -21,10 +28,59 @@ const client = createDiscordClient({
 let controlChannel;
 let slashRegisterWarned = false;
 const pendingAlbums = {};
-const typingTimeouts = {};
 const deliveredMessages = new Set();
-const FORCE_TOKENS = new Set(['--force', '-f']);
 const BOT_PERMISSIONS = 536879120;
+const UPDATE_BUTTON_IDS = utils.discord.updateButtonIds;
+const ROLLBACK_BUTTON_ID = utils.discord.rollbackButtonId;
+const bridgePinnedMessages = new Set();
+const pinExpiryTimers = new Map();
+
+const getPinDurationSeconds = () => {
+  const configured = Number(state.settings.PinDurationSeconds);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return PIN_DURATION_PRESETS['7d'];
+};
+
+const schedulePinExpiryNotice = (message, durationSeconds) => {
+  const durationMs = durationSeconds * 1000;
+  if (!message || durationMs <= 0) {
+    return;
+  }
+  const existing = pinExpiryTimers.get(message.id);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  const timer = setTimeout(async () => {
+    pinExpiryTimers.delete(message.id);
+    let target = message;
+    try {
+      target = await message.fetch();
+    } catch {
+      /* best-effort */
+    }
+    if (!target?.pinned) return;
+    bridgePinnedMessages.add(target.id);
+    try {
+      await target.unpin();
+    } catch {
+      /* ignore */
+    } finally {
+      bridgePinnedMessages.delete(target.id);
+    }
+    await target.channel?.send(`Pin expired after ${Math.round(durationSeconds / 86400)} day${durationSeconds === 86400 ? '' : 's'}.`).catch(() => {});
+  }, durationMs);
+  pinExpiryTimers.set(message.id, timer);
+};
+
+const clearPinExpiryNotice = (messageId) => {
+  const timer = pinExpiryTimers.get(messageId);
+  if (timer) {
+    clearTimeout(timer);
+    pinExpiryTimers.delete(messageId);
+  }
+};
 
 class CommandResponder {
   constructor({ interaction, channel }) {
@@ -75,28 +131,21 @@ class CommandResponder {
 }
 
 class CommandContext {
-  constructor({ interaction, message, rawArgs = [], lowerArgs = [], responder }) {
+  constructor({ interaction, responder }) {
     this.interaction = interaction;
-    this.message = message;
-    this.rawArgs = rawArgs;
-    this.lowerArgs = lowerArgs;
     this.responder = responder;
   }
 
   get channel() {
-    return this.interaction?.channel ?? this.message?.channel ?? null;
+    return this.interaction?.channel ?? null;
   }
 
   get createdTimestamp() {
-    return this.interaction?.createdTimestamp ?? this.message?.createdTimestamp ?? Date.now();
+    return this.interaction?.createdTimestamp ?? Date.now();
   }
 
   get isControlChannel() {
     return this.channel?.id === state.settings.ControlChannelID;
-  }
-
-  get argString() {
-    return this.rawArgs.join(' ');
   }
 
   async reply(payload) {
@@ -131,18 +180,12 @@ class CommandContext {
     return this.interaction?.options?.getChannel(name);
   }
 
-  getMentionedChannel(index = 0) {
-    if (!this.message?.mentions?.channels?.size) {
-      return null;
-    }
-    const channels = [...this.message.mentions.channels.values()];
-    return channels[index] ?? null;
-  }
 }
 
 const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) => {
   let msgContent = '';
   const files = [];
+  let components = [];
   const webhook = await utils.discord.getOrCreateChannel(message.channelJid);
   const avatarURL = message.profilePic || DEFAULT_AVATAR_URL;
   const content = utils.discord.convertWhatsappFormatting(message.content);
@@ -202,11 +245,22 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
     }
   }
 
+  if (msgContent) {
+    const normalization = utils.discord.ensureExplicitUrlScheme(msgContent);
+    msgContent = normalization.text;
+  }
+
+  if (message.isPoll && Array.isArray(message.pollOptions) && message.pollOptions.length) {
+    const note = '\n\nPoll voting is only available on WhatsApp. Please vote from your phone.';
+    msgContent = (msgContent || message.content || 'Poll') + note;
+    components = [];
+  }
+
   if (message.isEdit) {
     const dcMessageId = state.lastMessages[message.id];
     if (dcMessageId) {
       try {
-        await utils.discord.safeWebhookEdit(webhook, dcMessageId, { content: msgContent || null }, message.channelJid);
+        await utils.discord.safeWebhookEdit(webhook, dcMessageId, { content: msgContent || null, components }, message.channelJid);
         return;
       } catch (err) {
         state.logger?.error(err);
@@ -217,6 +271,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
       content: msgContent,
       username: message.name,
       avatarURL,
+      components,
     }, message.channelJid);
     if (message.id != null) {
       // bidirectional map automatically stores both directions
@@ -233,6 +288,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
         content: msgContent.shift(),
         username: message.name,
         avatarURL,
+        components,
       }, message.channelJid);
     }
 
@@ -257,6 +313,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
         username: message.name,
         files: fileChunks[i],
         avatarURL,
+        components,
       };
       lastDcMessage = await utils.discord.safeWebhookSend(webhook, sendArgs, message.channelJid);
 
@@ -311,21 +368,31 @@ client.on('channelDelete', async (channel) => {
   }
 });
 
+const typingTimers = new Map();
+
 client.on('typingStart', async (typing) => {
-  if ((state.settings.oneWay >> 1 & 1) === 0) { return; }
-  const { channel } = typing;
-  const jid = utils.discord.channelIdToJid(channel.id);
-  if (!jid) { return; }
-  if (!state.waClient) { return; }
-  try {
-    await state.waClient.sendPresenceUpdate('composing', jid);
-    clearTimeout(typingTimeouts[jid]);
-    typingTimeouts[jid] = setTimeout(() => {
+  const channelId = typing?.channel?.id;
+  const jid = channelId ? utils.discord.channelIdToJid(channelId) : null;
+  if (!jid || !state.waClient?.sendPresenceUpdate) return;
+
+  const sendPausedLater = () => {
+    const existing = typingTimers.get(channelId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      typingTimers.delete(channelId);
       state.waClient.sendPresenceUpdate('paused', jid).catch(() => {});
     }, 5000);
-  } catch (err) {
-    state.logger?.error(err);
+    typingTimers.set(channelId, timer);
+  };
+
+  try {
+    await state.waClient.sendPresenceUpdate('composing', jid);
+  } catch {
+    /* ignore */
   }
+  sendPausedLater();
 });
 
 client.on('whatsappMessage', async (message) => {
@@ -390,14 +457,6 @@ client.on('whatsappReaction', async (reaction) => {
   if (!Object.keys(msgReactions).length) {
     delete state.reactions[messageId];
   }
-});
-
-client.on('whatsappTyping', async ({ jid, isTyping }) => {
-  if ((state.settings.oneWay >> 0 & 1) === 0) { return; }
-  const channelId = state.chats[jid]?.channelId;
-  if (!channelId || !isTyping) { return; }
-  const channel = await utils.discord.getChannel(channelId);
-  channel.sendTyping().catch(() => {});
 });
 
 client.on('whatsappRead', async ({ id, jid }) => {
@@ -520,6 +579,36 @@ client.on('whatsappCall', async ({ call, jid }) => {
   }
 });
 
+client.on('whatsappPin', async ({ jid, key, pinned }) => {
+  if ((state.settings.oneWay >> 0 & 1) === 0) {
+    return;
+  }
+  const channelId = state.chats[jid]?.channelId;
+  const dcMessageId = state.lastMessages[key.id];
+  if (!channelId || !dcMessageId) {
+    return;
+  }
+  const channel = await utils.discord.getChannel(channelId);
+  const message = await channel.messages.fetch(dcMessageId).catch(() => null);
+  if (!message) {
+    return;
+  }
+  bridgePinnedMessages.add(message.id);
+  try {
+    if (pinned) {
+      await message.pin();
+      schedulePinExpiryNotice(message, getPinDurationSeconds());
+    } else {
+      await message.unpin();
+      clearPinExpiryNotice(message.id);
+    }
+  } catch (err) {
+    state.logger?.warn({ err }, 'Failed to sync WhatsApp pin to Discord');
+  } finally {
+    setTimeout(() => bridgePinnedMessages.delete(message.id), 5000);
+  }
+});
+
 const { ApplicationCommandOptionTypes } = Constants;
 
 const commandHandlers = {
@@ -540,7 +629,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const number = ctx.getStringOption('number') ?? ctx.rawArgs[0];
+      const number = ctx.getStringOption('number');
       if (!number) {
         await ctx.reply('Please enter your number. Usage: `pairWithCode <number>`. Don\'t use "+" or any other special characters.');
         return;
@@ -561,7 +650,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const contact = ctx.getStringOption('contact') ?? ctx.argString;
+      const contact = ctx.getStringOption('contact');
       if (!contact) {
         await ctx.reply('Please enter a phone number or name. Usage: `start <number with country code or name>`.');
         return;
@@ -590,6 +679,100 @@ const commandHandlers = {
       await ctx.reply(`Started a conversation in ${channelMention}.`);
     },
   },
+  poll: {
+    description: 'Create a WhatsApp poll in this channel.',
+    options: [
+      {
+        name: 'question',
+        description: 'Poll question/title.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+      {
+        name: 'options',
+        description: 'Comma-separated options (min 2).',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+      {
+        name: 'select',
+        description: 'How many options can be selected.',
+        type: ApplicationCommandOptionTypes.INTEGER,
+        required: false,
+      },
+      {
+        name: 'announcement',
+        description: 'Send as an announcement-group poll.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: false,
+      },
+    ],
+    async execute(ctx) {
+      const jid = utils.discord.channelIdToJid(ctx.channel?.id);
+      if (!jid) {
+        await ctx.reply('This command only works in channels linked to WhatsApp chats.');
+        return;
+      }
+      const question = ctx.getStringOption('question')?.trim();
+      const rawOptions = ctx.getStringOption('options') || '';
+      const values = rawOptions.split(',').map((opt) => opt.trim()).filter(Boolean);
+      if (!question) {
+        await ctx.reply('Please provide a poll question.');
+        return;
+      }
+      if (values.length < 2) {
+        await ctx.reply('Please provide at least two poll options (comma-separated).');
+        return;
+      }
+      const selectableCount = ctx.getIntegerOption('select') || 1;
+      if (selectableCount < 1 || selectableCount > values.length) {
+        await ctx.reply('Selectable count must be at least 1 and no more than the number of options.');
+        return;
+      }
+      const toAnnouncementGroup = Boolean(ctx.getBooleanOption('announcement'));
+      try {
+        const sent = await state.waClient.sendMessage(jid, {
+          poll: {
+            name: question,
+            values,
+            selectableCount,
+            toAnnouncementGroup,
+          },
+        });
+        messageStore.set(sent);
+        await ctx.reply('Poll sent to WhatsApp!');
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to send poll to WhatsApp');
+        await ctx.reply('Failed to send the poll to WhatsApp. Please try again.');
+      }
+    },
+  },
+  setpinduration: {
+    description: 'Set the default pin duration for WhatsApp pins.',
+    options: [
+      {
+        name: 'duration',
+        description: 'How long pins last by default.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+        choices: [
+          { name: '24 hours', value: '24h' },
+          { name: '7 days', value: '7d' },
+          { name: '30 days', value: '30d' },
+        ],
+      },
+    ],
+    async execute(ctx) {
+      const choice = ctx.getStringOption('duration');
+      const seconds = PIN_DURATION_PRESETS[choice];
+      if (!seconds) {
+        await ctx.reply('Invalid duration. Choose 24h, 7d, or 30d.');
+        return;
+      }
+      state.settings.PinDurationSeconds = seconds;
+      await ctx.reply(`Default pin duration set to ${choice}.`);
+    },
+  },
   link: {
     description: 'Link a WhatsApp chat to an existing channel.',
     options: [
@@ -613,22 +796,9 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const force = ctx.getBooleanOption('force') ?? ctx.lowerArgs?.some((token) => FORCE_TOKENS.has(token));
-      const slashChannel = ctx.getChannelOption('channel');
-      const messageChannel = ctx.message?.mentions?.channels?.first();
-      const channel = slashChannel ?? messageChannel;
-      const argsWithoutFlags = (ctx.lowerArgs || []).filter((token) => !FORCE_TOKENS.has(token));
-      const mentionTokenLower = channel ? `<#${channel.id}>`.toLowerCase() : null;
-
-      let contactQuery = ctx.getStringOption('contact');
-      if (!contactQuery && ctx.rawArgs?.length) {
-        const mentionIndex = mentionTokenLower != null ? argsWithoutFlags.indexOf(mentionTokenLower) : -1;
-        if (mentionIndex === -1) {
-          contactQuery = ctx.rawArgs.filter((token, idx) => !FORCE_TOKENS.has(ctx.lowerArgs[idx]) && token !== mentionTokenLower).join(' ');
-        } else {
-          contactQuery = ctx.rawArgs.slice(0, mentionIndex).join(' ');
-        }
-      }
+      const force = Boolean(ctx.getBooleanOption('force'));
+      const channel = ctx.getChannelOption('channel');
+      const contactQuery = ctx.getStringOption('contact');
 
       if (!channel || !contactQuery) {
         await ctx.reply('Please provide a contact and a channel. Usage: `link <number with country code or name> #<channel>`');
@@ -663,7 +833,7 @@ const commandHandlers = {
       let displacedRun;
       if (existingJid && existingJid !== normalizedJid) {
         if (!force) {
-          await ctx.reply('That channel is already linked to another WhatsApp conversation. Add `--force` (or use the `move` command) to override it.');
+          await ctx.reply('That channel is already linked to another WhatsApp conversation. Enable the force option (or use the move command) to override it.');
           return;
         }
         displacedChat = state.chats[existingJid];
@@ -763,27 +933,12 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const slashFrom = ctx.getChannelOption('from');
-      const slashTo = ctx.getChannelOption('to');
-      const mentionMatches = ctx.message?.content?.match(/<#(\d+)>/g) || [];
-      const orderedIds = [];
-      for (const token of mentionMatches) {
-        const id = token.replace(/[^\d]/g, '');
-        if (id && !orderedIds.includes(id)) {
-          orderedIds.push(id);
-        }
-        if (orderedIds.length === 2) {
-          break;
-        }
-      }
-      const messageFrom = orderedIds[0] ? ctx.message?.mentions?.channels?.get(orderedIds[0]) : null;
-      const messageTo = orderedIds[1] ? ctx.message?.mentions?.channels?.get(orderedIds[1]) : null;
-      const source = slashFrom ?? messageFrom;
-      const target = slashTo ?? messageTo;
-      const force = ctx.getBooleanOption('force') ?? (ctx.lowerArgs?.some((token) => FORCE_TOKENS.has(token)));
+      const source = ctx.getChannelOption('from');
+      const target = ctx.getChannelOption('to');
+      const force = Boolean(ctx.getBooleanOption('force'));
 
       if (!source || !target) {
-        await ctx.reply('Please mention the current channel and the new channel. Usage: `move #old-channel #new-channel [--force]`');
+        await ctx.reply('Please mention the current channel and the new channel. Usage: `move #old-channel #new-channel` (enable the force option to override existing links)');
         return;
       }
 
@@ -820,7 +975,7 @@ const commandHandlers = {
       let displacedRun;
       if (existingTargetJid && existingTargetJid !== normalizedJid) {
         if (!force) {
-          await ctx.reply('That destination channel is already linked to another conversation. Add `--force` to override it.');
+          await ctx.reply('That destination channel is already linked to another conversation. Enable the force option to override it.');
           return;
         }
         displacedChat = state.chats[existingTargetJid];
@@ -918,7 +1073,7 @@ const commandHandlers = {
     ],
     async execute(ctx) {
       let contacts = utils.whatsapp.contacts();
-      const query = (ctx.getStringOption('query') ?? ctx.argString)?.toLowerCase();
+      const query = ctx.getStringOption('query')?.toLowerCase();
       if (query) { contacts = contacts.filter((name) => name.toLowerCase().includes(query)); }
       contacts = contacts.sort((a, b) => a.localeCompare(b)).join('\n');
       const message = utils.discord.partitionText(
@@ -943,7 +1098,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const channel = ctx.getChannelOption('channel') ?? ctx.getMentionedChannel();
+      const channel = ctx.getChannelOption('channel');
       if (!channel) {
         await ctx.reply('Please enter a valid channel name. Usage: `addToWhitelist #<target channel>`.');
         return;
@@ -973,7 +1128,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const channel = ctx.getChannelOption('channel') ?? ctx.getMentionedChannel();
+      const channel = ctx.getChannelOption('channel');
       if (!channel) {
         await ctx.reply('Please enter a valid channel name. Usage: `removeFromWhitelist #<target channel>`.');
         return;
@@ -1011,7 +1166,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const prefix = ctx.getStringOption('prefix') ?? ctx.argString;
+      const prefix = ctx.getStringOption('prefix');
       if (prefix) {
         state.settings.DiscordPrefixText = prefix;
         await ctx.reply(`Discord prefix is set to ${prefix}!`);
@@ -1134,8 +1289,12 @@ const commandHandlers = {
         'app-state-sync-version': { critical_unblock_low: null },
       });
       await state.waClient.resyncAppState(['critical_unblock_low']);
-      for (const [jid, attributes] of Object.entries(await state.waClient.groupFetchAllParticipating())) { state.waClient.contacts[jid] = attributes.subject; }
-      const shouldRename = ctx.getBooleanOption('rename') ?? (ctx.lowerArgs || []).includes('rename');
+      const participatingGroups = await state.waClient.groupFetchAllParticipating();
+      groupMetadataCache.prime(participatingGroups);
+      for (const [jid, attributes] of Object.entries(participatingGroups)) {
+        state.waClient.contacts[jid] = attributes.subject;
+      }
+      const shouldRename = Boolean(ctx.getBooleanOption('rename'));
       if (shouldRename) {
         try {
           await utils.discord.renameChannels();
@@ -1177,11 +1336,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const message = ctx.getStringOption('message') ?? ctx.argString;
-      if (!message) {
-        await ctx.reply('Please provide a template. Usage: `setDownloadMessage <your message here>`');
-        return;
-      }
+      const message = ctx.getStringOption('message');
       state.settings.LocalDownloadMessage = message;
       await ctx.reply(`Set download message format to "${state.settings.LocalDownloadMessage}"`);
     },
@@ -1203,11 +1358,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const dir = ctx.getStringOption('path') ?? ctx.argString;
-      if (!dir) {
-        await ctx.reply('Please provide a path. Usage: `setDownloadDir <desired save path>`');
-        return;
-      }
+      const dir = ctx.getStringOption('path');
       state.settings.DownloadDir = dir;
       await ctx.reply(`Set download path to "${state.settings.DownloadDir}"`);
     },
@@ -1223,7 +1374,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const gb = ctx.getNumberOption('size') ?? parseFloat(ctx.rawArgs?.[0]);
+      const gb = ctx.getNumberOption('size');
       if (!Number.isNaN(gb) && gb >= 0) {
         state.settings.DownloadDirLimitGB = gb;
         await ctx.reply(`Set download directory size limit to ${gb} GB.`);
@@ -1243,7 +1394,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const size = ctx.getIntegerOption('bytes') ?? parseInt(ctx.rawArgs?.[0], 10);
+      const size = ctx.getIntegerOption('bytes');
       if (!Number.isNaN(size) && size > 0) {
         state.settings.DiscordFileSizeLimit = size;
         await ctx.reply(`Set Discord file size limit to ${size} bytes.`);
@@ -1279,7 +1430,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const port = ctx.getIntegerOption('port') ?? parseInt(ctx.rawArgs?.[0], 10);
+      const port = ctx.getIntegerOption('port');
       if (!Number.isNaN(port) && port > 0 && port <= 65535) {
         state.settings.LocalDownloadServerPort = port;
         utils.stopDownloadServer();
@@ -1301,15 +1452,11 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const host = ctx.getStringOption('host') ?? ctx.rawArgs?.[0];
-      if (host) {
-        state.settings.LocalDownloadServerHost = host;
-        utils.stopDownloadServer();
-        utils.ensureDownloadServer();
-        await ctx.reply(`Set local download server host to ${host}.`);
-      } else {
-        await ctx.reply('Please provide a host name or IP.');
-      }
+      const host = ctx.getStringOption('host');
+      state.settings.LocalDownloadServerHost = host;
+      utils.stopDownloadServer();
+      utils.ensureDownloadServer();
+      await ctx.reply(`Set local download server host to ${host}.`);
     },
   },
   enablehttpsdownloadserver: {
@@ -1347,12 +1494,8 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const key = ctx.getStringOption('key_path') ?? ctx.rawArgs?.[0];
-      const cert = ctx.getStringOption('cert_path') ?? ctx.rawArgs?.[1];
-      if (!key || !cert) {
-        await ctx.reply('Usage: `setHttpsCert <key> <cert>`');
-        return;
-      }
+      const key = ctx.getStringOption('key_path');
+      const cert = ctx.getStringOption('cert_path');
       [state.settings.HttpsKeyPath, state.settings.HttpsCertPath] = [key, cert];
       utils.stopDownloadServer();
       utils.ensureDownloadServer();
@@ -1398,11 +1541,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const seconds = ctx.getIntegerOption('seconds') ?? parseInt(ctx.rawArgs?.[0], 10);
-      if (Number.isNaN(seconds)) {
-        await ctx.reply("Usage: autoSaveInterval <seconds>\nExample: autoSaveInterval 60");
-        return;
-      }
+      const seconds = ctx.getIntegerOption('seconds');
       state.settings.autoSaveInterval = seconds;
       await ctx.reply(`Changed auto save interval to ${seconds}.`);
     },
@@ -1418,11 +1557,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const size = ctx.getIntegerOption('size') ?? parseInt(ctx.rawArgs?.[0], 10);
-      if (Number.isNaN(size)) {
-        await ctx.reply("Usage: lastMessageStorage <size>\nExample: lastMessageStorage 1000");
-        return;
-      }
+      const size = ctx.getIntegerOption('size');
       state.settings.lastMessageStorage = size;
       await ctx.reply(`Changed last message storage size to ${size}.`);
     },
@@ -1443,11 +1578,7 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const direction = ctx.getStringOption('direction') ?? ctx.rawArgs?.[0];
-      if (!direction || !['discord', 'whatsapp', 'disabled'].includes(direction)) {
-        await ctx.reply("Usage: oneWay <discord|whatsapp|disabled>\nExample: oneWay whatsapp");
-        return;
-      }
+      const direction = ctx.getStringOption('direction');
 
       if (direction === 'disabled') {
         state.settings.oneWay = 0b11;
@@ -1472,16 +1603,8 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const enabledOption = ctx.getBooleanOption('enabled');
-      const raw = ctx.rawArgs?.[0]?.toLowerCase?.();
-      const rawValue = raw === 'yes' ? true : raw === 'no' ? false : null;
-      const enabled = enabledOption ?? rawValue;
-      if (enabled == null) {
-        await ctx.reply("Usage: redirectWebhooks <yes|no>\nExample: redirectWebhooks yes");
-        return;
-      }
-
-      state.settings.redirectWebhooks = Boolean(enabled);
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.redirectWebhooks = enabled;
       await ctx.reply(`Redirecting webhooks is set to ${state.settings.redirectWebhooks}.`);
     },
   },
@@ -1500,15 +1623,13 @@ const commandHandlers = {
       },
     ],
     async execute(ctx) {
-      const channel = (ctx.getStringOption('channel') ?? ctx.rawArgs?.[0])?.toLowerCase();
-      if (!['stable', 'unstable'].includes(channel)) {
-        await ctx.reply("Usage: updateChannel <stable|unstable>\nExample: updateChannel unstable");
-        return;
-      }
+      const channel = ctx.getStringOption('channel');
 
       state.settings.UpdateChannel = channel;
       await ctx.reply(`Update channel set to ${channel}. Checking for new releases...`);
       await utils.updater.run(state.version, { prompt: false });
+      await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
         await ctx.replyPartitioned(message);
@@ -1541,6 +1662,9 @@ const commandHandlers = {
       }
 
       await ctx.reply('Update downloaded. Restarting...');
+      state.updateInfo = null;
+      await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       await fs.promises.writeFile('restart.flag', '');
       process.exit();
     },
@@ -1550,9 +1674,24 @@ const commandHandlers = {
     async execute(ctx) {
       await ctx.defer();
       await utils.updater.run(state.version, { prompt: false });
+      await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       if (state.updateInfo) {
         const message = utils.updater.formatUpdateMessage(state.updateInfo);
-        await ctx.replyPartitioned(message);
+        const components = [
+          new MessageActionRow().addComponents(
+            new MessageButton()
+              .setCustomId(UPDATE_BUTTON_IDS.APPLY)
+              .setLabel('Update')
+              .setStyle('PRIMARY')
+              .setDisabled(!state.updateInfo.canSelfUpdate),
+            new MessageButton()
+              .setCustomId(UPDATE_BUTTON_IDS.SKIP)
+              .setLabel('Skip update')
+              .setStyle('SECONDARY'),
+          ),
+        ];
+        await ctx.reply({ content: message, components });
       } else {
         await ctx.reply('No update available.');
       }
@@ -1562,6 +1701,8 @@ const commandHandlers = {
     description: 'Clear the current update notification.',
     async execute(ctx) {
       state.updateInfo = null;
+      await utils.discord.syncUpdatePrompt();
+      await utils.discord.syncRollbackPrompt();
       await ctx.reply('Update skipped.');
     },
   },
@@ -1572,6 +1713,7 @@ const commandHandlers = {
       const result = await utils.updater.rollback();
       if (result.success) {
         await ctx.reply('Rolled back to the previous packaged binary. Restarting...');
+        await utils.discord.syncRollbackPrompt();
         await fs.promises.writeFile('restart.flag', '');
         process.exit();
         return;
@@ -1595,11 +1737,7 @@ const commandHandlers = {
   unknown: {
     register: false,
     async execute(ctx) {
-      if (ctx.message) {
-        await ctx.reply(`Unknown command: \`${ctx.message.content}\`\nType \`/help\` to see available commands`);
-      } else {
-        await ctx.reply('Unknown command.');
-      }
+      await ctx.reply('Unknown command.');
     },
   },
 };
@@ -1645,16 +1783,36 @@ const executeCommand = async (name, ctx) => {
   await handler.execute(ctx);
 };
 
+const handleInteractionCommand = async (interaction, commandName) => {
+  const responder = new CommandResponder({ interaction, channel: interaction.channel });
+  await responder.defer();
+  const ctx = new CommandContext({ interaction, responder });
+  await executeCommand(commandName, ctx);
+};
+
 client.on('interactionCreate', async (interaction) => {
+  if (interaction.isButton()) {
+    if (interaction.customId === UPDATE_BUTTON_IDS.APPLY) {
+      await handleInteractionCommand(interaction, 'update');
+      return;
+    }
+    if (interaction.customId === UPDATE_BUTTON_IDS.SKIP) {
+      await handleInteractionCommand(interaction, 'skipupdate');
+      return;
+    }
+    if (interaction.customId === ROLLBACK_BUTTON_ID) {
+      await handleInteractionCommand(interaction, 'rollback');
+      return;
+    }
+    return;
+  }
+
   if (!interaction.isCommand?.() && !interaction.isChatInputCommand?.()) {
     return;
   }
 
-  const responder = new CommandResponder({ interaction, channel: interaction.channel });
-  await responder.defer();
-  const ctx = new CommandContext({ interaction, responder });
   const commandName = interaction.commandName?.toLowerCase();
-  await executeCommand(commandName, ctx);
+  await handleInteractionCommand(interaction, commandName);
 });
 
 client.on('messageCreate', async (message) => {
@@ -1662,17 +1820,13 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  const messageType = typeof message.type === 'number' ? Constants.MessageTypes?.[message.type] : message.type;
+  if (messageType === 'CHANNEL_PINNED_MESSAGE') {
+    return;
+  }
+
   if (message.channel.id === state.settings.ControlChannelID) {
-    const [commandNameRaw, ...rawArgs] = message.content.trim().split(/\s+/);
-    const commandName = (commandNameRaw || '').toLowerCase();
-    const responder = new CommandResponder({ channel: controlChannel || message.channel });
-    const ctx = new CommandContext({
-      message,
-      responder,
-      rawArgs,
-      lowerArgs: rawArgs.map((arg) => arg.toLowerCase()),
-    });
-    await executeCommand(commandName, ctx);
+    await message.channel.send('Regular commands have been removed. Please use Discord slash commands (/) instead.');
     return;
   }
 
@@ -1684,10 +1838,8 @@ client.on('messageCreate', async (message) => {
   state.waClient.ev.emit('discordMessage', { jid, message });
 });
 
-client.on('messageUpdate', async (_, message) => {
-  if (message.webhookId != null) {
-    return;
-  }
+client.on('messageUpdate', async (oldMessage, message) => {
+  const isWebhookMessage = message.webhookId != null;
 
   if (message.partial) {
     try {
@@ -1698,12 +1850,63 @@ client.on('messageUpdate', async (_, message) => {
     }
   }
 
-  if (message.editedTimestamp == null) {
+  const jid = utils.discord.channelIdToJid(message.channelId);
+  if (jid == null) {
     return;
   }
 
-  const jid = utils.discord.channelIdToJid(message.channelId);
-  if (jid == null) {
+  const oldPinned = typeof oldMessage?.pinned === 'boolean' ? oldMessage.pinned : undefined;
+  const newPinned = Boolean(message.pinned);
+  const pinChanged = typeof oldPinned === 'boolean' ? oldPinned !== newPinned : newPinned === true;
+
+  if (pinChanged) {
+    const waId = state.lastMessages[message.id];
+    if (waId == null) {
+      await message.channel.send(`Couldn't ${newPinned ? 'pin' : 'unpin'} on WhatsApp. You can only pin messages synced with WhatsApp.`);
+    } else if (bridgePinnedMessages.has(message.id)) {
+      bridgePinnedMessages.delete(message.id);
+    } else {
+      const stored = messageStore.get({ id: waId, remoteJid: jid });
+      const key = stored?.key || { id: waId, remoteJid: jid, fromMe: stored?.key?.fromMe || false };
+      const pinType = newPinned ? 1 : 0;
+      try {
+        state.sentPins.add(key.id);
+        const sentPinMsg = await state.waClient.sendMessage(jid, {
+          pin: key,
+          type: pinType,
+          ...(pinType === 1 ? { time: getPinDurationSeconds() } : {}),
+        });
+        const pinNoticeKey = sentPinMsg?.key
+          ? {
+              ...sentPinMsg.key,
+              remoteJid: utils.whatsapp.formatJid(sentPinMsg.key.remoteJid || jid),
+              participant: utils.whatsapp.formatJid(sentPinMsg.key.participant || sentPinMsg.key.participantAlt),
+            }
+          : null;
+        if (pinNoticeKey?.id) {
+          state.sentPins.add(pinNoticeKey.id);
+        }
+        if (newPinned) {
+          schedulePinExpiryNotice(message, getPinDurationSeconds());
+        } else {
+          clearPinExpiryNotice(message.id);
+        }
+        setTimeout(() => state.sentPins.delete(key.id), 5 * 60 * 1000);
+        if (pinNoticeKey?.id) {
+          setTimeout(() => state.sentPins.delete(pinNoticeKey.id), 5 * 60 * 1000);
+          try {
+            await state.waClient.sendMessage(pinNoticeKey.remoteJid, { delete: pinNoticeKey });
+          } catch (err) {
+            state.logger?.debug?.({ err }, 'Failed to delete local pin notice');
+          }
+        }
+      } catch (err) {
+        state.logger?.error({ err }, 'Failed to sync Discord pin to WhatsApp');
+      }
+    }
+  }
+
+  if (message.editedTimestamp == null || isWebhookMessage) {
     return;
   }
 
@@ -1713,7 +1916,7 @@ client.on('messageUpdate', async (_, message) => {
     return;
   }
 
-  if (message.content.trim() === '') {
+  if ((message.content || '').trim() === '') {
     await message.channel.send('Edited message has no text to send to WhatsApp.');
     return;
   }
@@ -1756,6 +1959,7 @@ client.on('messageDelete', async (message) => {
     delete state.lastMessages[waId];
   }
   delete state.lastMessages[message.id];
+  clearPinExpiryNotice(message.id);
 });
 
 client.on('messageReactionAdd', async (reaction, user) => {
