@@ -25,6 +25,7 @@ const state = {
     autoSaveInterval: 5 * 60,
     lastMessageStorage: 500,
     oneWay: 0b11,
+    redirectBots: true,
     redirectWebhooks: false,
     DeleteMessages: true,
     ReadReceipts: true,
