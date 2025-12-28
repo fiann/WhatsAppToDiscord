@@ -1592,6 +1592,22 @@ const commandHandlers = {
       }
     },
   },
+  redirectbots: {
+    description: 'Toggle redirecting bot messages to WhatsApp.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether bot messages should be redirected.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.redirectBots = enabled;
+      await ctx.reply(`Redirecting bots is set to ${state.settings.redirectBots}.`);
+    },
+  },
   redirectwebhooks: {
     description: 'Toggle redirecting webhook messages to WhatsApp.',
     options: [
@@ -1816,7 +1832,17 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.on('messageCreate', async (message) => {
-  if (message.author === client.user || message.applicationId === client.user.id || (message.webhookId != null && !state.settings.redirectWebhooks)) {
+  const isWebhookMessage = message.webhookId != null;
+
+  if (message.author === client.user || message.applicationId === client.user.id) {
+    return;
+  }
+
+  if (isWebhookMessage) {
+    if (!state.settings.redirectWebhooks) {
+      return;
+    }
+  } else if (message.author?.bot && !state.settings.redirectBots) {
     return;
   }
 
@@ -1912,6 +1938,9 @@ client.on('messageUpdate', async (oldMessage, message) => {
 
   const messageId = state.lastMessages[message.id];
   if (messageId == null) {
+    if (message.author?.bot && !state.settings.redirectBots) {
+      return;
+    }
     await message.channel.send(`Couldn't edit the message. You can only edit the last ${state.settings.lastMessageStorage} messages.`);
     return;
   }
@@ -1942,6 +1971,10 @@ client.on('messageDelete', async (message) => {
   }
 
   if (message.webhookId != null && waIds.length === 0) {
+    return;
+  }
+
+  if (message.author?.bot && !state.settings.redirectBots && waIds.length === 0) {
     return;
   }
 
@@ -1980,6 +2013,9 @@ client.on('messageReactionAdd', async (reaction, user) => {
   }
   const messageId = state.lastMessages[reaction.message.id];
   if (messageId == null) {
+    if (reaction.message.webhookId == null && reaction.message.author?.bot && !state.settings.redirectBots) {
+      return;
+    }
     await reaction.message.channel.send(`Couldn't send the reaction. You can only react to last ${state.settings.lastMessageStorage} messages.`);
     return;
   }
@@ -2016,6 +2052,9 @@ client.on('messageReactionRemove', async (reaction, user) => {
   }
   const messageId = state.lastMessages[reaction.message.id];
   if (messageId == null) {
+    if (reaction.message.webhookId == null && reaction.message.author?.bot && !state.settings.redirectBots) {
+      return;
+    }
     await reaction.message.channel.send(`Couldn't remove the reaction. You can only react to last ${state.settings.lastMessageStorage} messages.`);
     return;
   }

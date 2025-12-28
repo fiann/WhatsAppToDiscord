@@ -344,6 +344,172 @@ test('Discord pin system messages are not forwarded to WhatsApp', async () => {
   }
 });
 
+test('Discord bot messages can be blocked from forwarding to WhatsApp', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    channelIdToJid: utils.discord.channelIdToJid,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+    ControlChannelID: state.settings.ControlChannelID,
+    redirectBots: state.settings.redirectBots,
+    redirectWebhooks: state.settings.redirectWebhooks,
+  };
+  const originalDcClient = state.dcClient;
+  const originalWaClient = state.waClient;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.settings.ControlChannelID = 'control';
+    state.settings.redirectBots = false;
+    state.settings.redirectWebhooks = true;
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.channelIdToJid = () => 'jid@s.whatsapp.net';
+
+    const waEvents = [];
+    const waEv = new EventEmitter();
+    waEv.on('discordMessage', (payload) => waEvents.push(payload));
+    state.waClient = { ev: waEv };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+
+    const discordHandler = await importDiscordHandler('bot-filter-message-create');
+    state.dcClient = await discordHandler.start();
+
+    fakeClient.emit('messageCreate', {
+      author: { id: 'bot-2', bot: true },
+      applicationId: null,
+      webhookId: null,
+      channel: { id: 'chan-1' },
+    });
+    await delay(0);
+    assert.equal(waEvents.length, 0);
+
+    fakeClient.emit('messageCreate', {
+      author: { id: 'user-1', bot: false },
+      applicationId: null,
+      webhookId: null,
+      channel: { id: 'chan-1' },
+    });
+    await delay(0);
+    assert.equal(waEvents.length, 1);
+
+    fakeClient.emit('messageCreate', {
+      author: { id: 'bot-3', bot: true },
+      applicationId: null,
+      webhookId: 'wh-1',
+      channel: { id: 'chan-1' },
+    });
+    await delay(0);
+    assert.equal(waEvents.length, 2);
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.channelIdToJid = originalDiscordUtils.channelIdToJid;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+    state.settings.ControlChannelID = originalSettings.ControlChannelID;
+    state.settings.redirectBots = originalSettings.redirectBots;
+    state.settings.redirectWebhooks = originalSettings.redirectWebhooks;
+
+    state.dcClient = originalDcClient;
+    state.waClient = originalWaClient;
+    resetClientFactoryOverrides();
+  }
+});
+
+test('Unbridged bot deletes do not spam errors when redirectBots is disabled', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    channelIdToJid: utils.discord.channelIdToJid,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+    redirectBots: state.settings.redirectBots,
+  };
+  const originalDcClient = state.dcClient;
+  const originalWaClient = state.waClient;
+  const originalLastMessages = state.lastMessages;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.settings.redirectBots = false;
+    state.lastMessages = {};
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.channelIdToJid = () => 'jid@s.whatsapp.net';
+
+    const waEv = new EventEmitter();
+    state.waClient = { ev: waEv };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+
+    const discordHandler = await importDiscordHandler('bot-filter-message-delete');
+    state.dcClient = await discordHandler.start();
+
+    const sends = [];
+    fakeClient.emit('messageDelete', {
+      id: 'dc-1',
+      channelId: 'chan-1',
+      webhookId: null,
+      author: { id: 'bot-2', bot: true },
+      channel: { send: async (text) => sends.push(text) },
+    });
+    await delay(0);
+
+    assert.equal(sends.length, 0);
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.channelIdToJid = originalDiscordUtils.channelIdToJid;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+    state.settings.redirectBots = originalSettings.redirectBots;
+
+    state.dcClient = originalDcClient;
+    state.waClient = originalWaClient;
+    state.lastMessages = originalLastMessages;
+    resetClientFactoryOverrides();
+  }
+});
+
 test('Discord messageUpdate emits discordEdit for bridged messages', async () => {
   const originalDiscordUtils = {
     getGuild: utils.discord.getGuild,

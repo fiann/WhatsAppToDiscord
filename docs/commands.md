@@ -135,6 +135,10 @@ Toggle profile-picture / status-change alerts.
 Restrict the bridge to one direction or keep it bidirectional.  
 Usage: `/oneway direction:<discord|whatsapp|disabled>`
 
+### `/redirectbots`
+Allow or block Discord bot messages from being forwarded to WhatsApp.  
+Usage: `/redirectbots enabled:<true|false>`
+
 ### `/redirectwebhooks`
 Allow or block Discord webhook messages from being forwarded to WhatsApp.  
 Usage: `/redirectwebhooks enabled:<true|false>`
