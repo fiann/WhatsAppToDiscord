@@ -4519,7 +4519,7 @@ const connectToWhatsApp = async (retry = 1) => {
 		if (state.settings.DiscordPrefix) {
 			const prefix =
 				state.settings.DiscordPrefixText ||
-				message.member?.nickname ||
+				message.member?.displayName ||
 				message.author.username;
 			text = `*${prefix}*\n${text}`;
 		}

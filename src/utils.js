@@ -3838,6 +3838,12 @@ const whatsapp = {
 		if (myJid && formatted && this.isMe(myJid, formatted)) {
 			return "You";
 		}
+		// Cache pushName for future lookups (e.g., mentions)
+		if (pushName && formatted && !state.waClient?.contacts?.[formatted]) {
+			if (state.waClient?.contacts)
+				state.waClient.contacts[formatted] = pushName;
+			state.contacts[formatted] = pushName;
+		}
 		const contactName =
 			(formatted &&
 				(state.waClient?.contacts?.[formatted] ??
