@@ -1,4 +1,5 @@
 import cluster from 'cluster';
+import { spawn } from 'child_process';
 import path from 'path';
 import pino from 'pino';
 import pretty from 'pino-pretty';
@@ -19,6 +20,8 @@ const RESTART_DELAY = resolveRestartDelayMs(process.env.WA2DC_RESTART_DELAY);
 const SAFE_RUNTIME_RESET_WINDOW = resolveSafeRuntimeResetWindowMs(RESTART_DELAY);
 const MAX_RESTARTS = resolveMaxRestarts(process.env.WA2DC_MAX_RESTARTS);
 const RESTART_FLAG_PATH = resolveRestartFlagPath(process.env.WA2DC_RESTART_FLAG_PATH, process.cwd());
+
+const WORKER_ENV_FLAG = 'WA2DC_WORKER';
 
 const overrideChildUrl = process.env.WA2DC_CHILD_PATH
   ? pathToFileURL(path.resolve(process.env.WA2DC_CHILD_PATH))
@@ -43,22 +46,12 @@ async function runWorker() {
   }
 }
 
-async function main() {
-  if (!cluster.isPrimary) {
-    await runWorker();
-    return;
-  }
-
-  const clusterExecArgv = process.pkg ? [] : ['--no-deprecation'];
-  // `silent: true` pipes worker stdout/stderr so we can tee them into terminal.log.
-  cluster.setupPrimary({ execArgv: clusterExecArgv, silent: true });
-
+function setupSupervisorLogging() {
   const logger = pino({}, pino.multistream([
     { stream: pino.destination('logs.txt') },
     { stream: pretty({ colorize: true }) },
   ]));
 
-  // Capture everything printed to the terminal in a separate file
   const termLogPath = path.resolve(process.cwd(), 'terminal.log');
   const termLog = fs.createWriteStream(termLogPath, { flags: 'a' });
   termLog.on('error', (err) => logger?.warn?.({ err }, 'terminal.log write error'));
@@ -75,6 +68,112 @@ async function main() {
   process.on('exit', () => {
     termLog.end();
   });
+
+  return logger;
+}
+
+async function runSupervisorWithSpawn() {
+  const logger = setupSupervisorLogging();
+
+  let restartAttempts = 0;
+  let workerStartTime = 0;
+  let currentWorker = null;
+  let shuttingDown = false;
+
+  const handleExit = (code, signal) => {
+    if (shuttingDown) {
+      process.exit(code ?? 0);
+    }
+
+    const runtime = Date.now() - workerStartTime;
+    const restartRequested = clearRestartFlagSync(RESTART_FLAG_PATH, { logger });
+
+    const decision = evaluateWorkerExit({
+      exitCode: code,
+      restartRequested,
+      runtimeMs: runtime,
+      safeRuntimeResetWindowMs: SAFE_RUNTIME_RESET_WINDOW,
+      restartAttempts,
+      maxRestarts: MAX_RESTARTS,
+      restartDelayMs: RESTART_DELAY,
+    });
+
+    restartAttempts = decision.restartAttempts;
+
+    if (decision.action === 'exit') {
+      if (decision.reason === 'max-restarts') {
+        logger.error(`Maximum restart attempts (${MAX_RESTARTS}) reached. Exiting.`);
+      }
+      process.exit(decision.exitCode);
+      return;
+    }
+
+    if (decision.reason === 'restart-flag') {
+      logger.info('Restart flag detected. Restarting immediately.');
+      setImmediate(start);
+      return;
+    }
+
+    const reason = code !== 0 ? ` unexpectedly with code ${code ?? signal}` : '';
+    logger.error(
+      `Bot exited${reason}. Restarting in ${decision.delayMs / 1000}s (attempt ${restartAttempts}/${MAX_RESTARTS})...`,
+    );
+    setTimeout(start, decision.delayMs);
+  };
+
+  const start = () => {
+    workerStartTime = Date.now();
+    currentWorker = spawn(process.execPath, [], {
+      env: { ...process.env, [WORKER_ENV_FLAG]: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    currentWorker.stdout?.pipe(process.stdout);
+    currentWorker.stderr?.pipe(process.stderr);
+
+    currentWorker.once('exit', (code, signal) => {
+      currentWorker = null;
+      handleExit(code, signal);
+    });
+
+    currentWorker.once('error', (err) => {
+      logger.error({ err }, 'Worker process error');
+    });
+  };
+
+  ['SIGINT', 'SIGTERM'].forEach((sig) => {
+    process.on(sig, () => {
+      shuttingDown = true;
+      if (currentWorker && !currentWorker.killed) {
+        currentWorker.kill(sig);
+      }
+    });
+  });
+
+  start();
+}
+
+async function main() {
+  if (process.env[WORKER_ENV_FLAG] === '1') {
+    await runWorker();
+    return;
+  }
+
+  if (process.pkg) {
+    await runSupervisorWithSpawn();
+    return;
+  }
+
+  if (!cluster.isPrimary) {
+    await runWorker();
+    return;
+  }
+
+  const clusterExecArgv = process.pkg ? [] : ['--no-deprecation'];
+  // `silent: true` pipes worker stdout/stderr so we can tee them into terminal.log.
+  cluster.setupPrimary({ execArgv: clusterExecArgv, silent: true });
+
+  const logger = setupSupervisorLogging();
 
   let restartAttempts = 0;
   let workerStartTime = 0;
