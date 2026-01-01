@@ -22,15 +22,20 @@ const state = {
     HttpsCertPath: '',
     Publish: false,
     ChangeNotifications: false,
+    MirrorWAStatuses: true,
     autoSaveInterval: 5 * 60,
     lastMessageStorage: 500,
     oneWay: 0b11,
+    redirectBots: true,
     redirectWebhooks: false,
     DeleteMessages: true,
     ReadReceipts: true,
     ReadReceiptMode: 'public',
     UpdateChannel: 'stable',
     KeepOldBinary: true,
+    UpdatePromptMessage: null,
+    RollbackPromptMessage: null,
+    PinDurationSeconds: 7 * 24 * 60 * 60,
   },
   dcClient: null,
   waClient: null,
@@ -55,6 +60,11 @@ const state = {
    * to avoid echoing them back when WhatsApp sends confirmation events.
    */
   sentReactions: new Set(),
+  /**
+   * Tracks pin actions we initiated to avoid echoing them back when
+   * WhatsApp emits pin-in-chat events.
+   */
+  sentPins: new Set(),
   goccRuns: {},
   updateInfo: null,
   version: '',
@@ -71,6 +81,7 @@ export const lastMessages = () => state.lastMessages;
 export const sentMessages = state.sentMessages;
 export const reactions = state.reactions;
 export const sentReactions = state.sentReactions;
+export const sentPins = state.sentPins;
 export const goccRuns = state.goccRuns;
 export const updateInfo = () => state.updateInfo;
 export const version = () => state.version;

@@ -4,40 +4,54 @@ import pino from 'pino';
 import pretty from 'pino-pretty';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
+import { promisify } from 'util';
 
-const DEFAULT_RESTART_DELAY = 10000; // ms
-const parsedRestartDelay = Number(process.env.WA2DC_RESTART_DELAY);
-const RESTART_DELAY = Number.isFinite(parsedRestartDelay) && parsedRestartDelay >= 0
-  ? parsedRestartDelay
-  : DEFAULT_RESTART_DELAY;
+import {
+  clearRestartFlagSync,
+  evaluateWorkerExit,
+  resolveMaxRestarts,
+  resolveRestartDelayMs,
+  resolveRestartFlagPath,
+  resolveSafeRuntimeResetWindowMs,
+} from './runnerLogic.js';
 
-const SAFE_RUNTIME_RESET_WINDOW = Math.max(RESTART_DELAY, DEFAULT_RESTART_DELAY);
-
-const parsedMaxRestarts = Number(process.env.WA2DC_MAX_RESTARTS);
-const MAX_RESTARTS = Number.isFinite(parsedMaxRestarts) && parsedMaxRestarts > 0
-  ? parsedMaxRestarts
-  : 5;
-
-const RESTART_FLAG_PATH = process.env.WA2DC_RESTART_FLAG_PATH
-  ? path.resolve(process.env.WA2DC_RESTART_FLAG_PATH)
-  : path.resolve(process.cwd(), 'restart.flag');
+const RESTART_DELAY = resolveRestartDelayMs(process.env.WA2DC_RESTART_DELAY);
+const SAFE_RUNTIME_RESET_WINDOW = resolveSafeRuntimeResetWindowMs(RESTART_DELAY);
+const MAX_RESTARTS = resolveMaxRestarts(process.env.WA2DC_MAX_RESTARTS);
+const RESTART_FLAG_PATH = resolveRestartFlagPath(process.env.WA2DC_RESTART_FLAG_PATH, process.cwd());
 
 const overrideChildUrl = process.env.WA2DC_CHILD_PATH
   ? pathToFileURL(path.resolve(process.env.WA2DC_CHILD_PATH))
   : null;
 
+const chmodAsync = promisify(fs.chmod);
+
 async function runWorker() {
   if (overrideChildUrl) {
+    const childPath = overrideChildUrl.pathname;
+    try {
+      await chmodAsync(childPath, 0o755);
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        // Best-effort: log but continue to attempt to start anyway.
+        console.warn({ err, childPath }, 'Failed to ensure child binary is executable');
+      }
+    }
     await import(overrideChildUrl.href);
   } else {
     await import('./index.js');
   }
 }
 
-if (!cluster.isPrimary) {
-  await runWorker();
-} else {
-  cluster.setupPrimary({ execArgv: ['--no-deprecation'] });
+async function main() {
+  if (!cluster.isPrimary) {
+    await runWorker();
+    return;
+  }
+
+  const clusterExecArgv = process.pkg ? [] : ['--no-deprecation'];
+  // `silent: true` pipes worker stdout/stderr so we can tee them into terminal.log.
+  cluster.setupPrimary({ execArgv: clusterExecArgv, silent: true });
 
   const logger = pino({}, pino.multistream([
     { stream: pino.destination('logs.txt') },
@@ -45,19 +59,18 @@ if (!cluster.isPrimary) {
   ]));
 
   // Capture everything printed to the terminal in a separate file
-  const termLog = fs.createWriteStream('terminal.log', { flags: 'a' });
+  const termLogPath = path.resolve(process.cwd(), 'terminal.log');
+  const termLog = fs.createWriteStream(termLogPath, { flags: 'a' });
+  termLog.on('error', (err) => logger?.warn?.({ err }, 'terminal.log write error'));
+
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
   const origStderrWrite = process.stderr.write.bind(process.stderr);
-
-  process.stdout.write = (chunk, encoding, cb) => {
-    termLog.write(chunk);
-    return origStdoutWrite(chunk, encoding, cb);
+  const tee = (orig) => (chunk, encoding, cb) => {
+    termLog.write(chunk, encoding, () => {});
+    return orig(chunk, encoding, cb);
   };
-
-  process.stderr.write = (chunk, encoding, cb) => {
-    termLog.write(chunk);
-    return origStderrWrite(chunk, encoding, cb);
-  };
+  process.stdout.write = tee(origStdoutWrite);
+  process.stderr.write = tee(origStderrWrite);
 
   process.on('exit', () => {
     termLog.end();
@@ -68,56 +81,45 @@ if (!cluster.isPrimary) {
   let currentWorker = null;
   let shuttingDown = false;
 
-  const clearRestartFlag = () => {
-    if (!fs.existsSync(RESTART_FLAG_PATH)) {
-      return false;
-    }
-    try {
-      fs.unlinkSync(RESTART_FLAG_PATH);
-    } catch (err) {
-      if (err.code !== 'ENOENT') {
-        logger.warn({ err }, 'Failed to remove restart flag');
-      }
-    }
-    return true;
-  };
-
   const handleExit = (code, signal) => {
     if (shuttingDown) {
       process.exit(code ?? 0);
     }
 
-    const restartRequested = clearRestartFlag();
     const runtime = Date.now() - workerStartTime;
-    if (runtime > SAFE_RUNTIME_RESET_WINDOW) {
-      restartAttempts = 0;
+    const restartRequested = clearRestartFlagSync(RESTART_FLAG_PATH, { logger });
+
+    const decision = evaluateWorkerExit({
+      exitCode: code,
+      restartRequested,
+      runtimeMs: runtime,
+      safeRuntimeResetWindowMs: SAFE_RUNTIME_RESET_WINDOW,
+      restartAttempts,
+      maxRestarts: MAX_RESTARTS,
+      restartDelayMs: RESTART_DELAY,
+    });
+
+    restartAttempts = decision.restartAttempts;
+
+    if (decision.action === 'exit') {
+      if (decision.reason === 'max-restarts') {
+        logger.error(`Maximum restart attempts (${MAX_RESTARTS}) reached. Exiting.`);
+      }
+      process.exit(decision.exitCode);
+      return;
     }
 
-    if (restartRequested) {
-      restartAttempts = 0;
+    if (decision.reason === 'restart-flag') {
       logger.info('Restart flag detected. Restarting immediately.');
       setImmediate(start);
       return;
     }
 
-    if (code === 0) {
-      process.exit(0);
-      return;
-    }
-
-    restartAttempts += 1;
-    if (restartAttempts > MAX_RESTARTS) {
-      logger.error(`Maximum restart attempts (${MAX_RESTARTS}) reached. Exiting.`);
-      process.exit(code ?? 1);
-      return;
-    }
-
-    const delay = RESTART_DELAY * (2 ** (restartAttempts - 1));
     const reason = code !== 0 ? ` unexpectedly with code ${code ?? signal}` : '';
     logger.error(
-      `Bot exited${reason}. Restarting in ${delay / 1000}s (attempt ${restartAttempts}/${MAX_RESTARTS})...`,
+      `Bot exited${reason}. Restarting in ${decision.delayMs / 1000}s (attempt ${restartAttempts}/${MAX_RESTARTS})...`,
     );
-    setTimeout(start, delay);
+    setTimeout(start, decision.delayMs);
   };
 
   const start = () => {
@@ -125,8 +127,12 @@ if (!cluster.isPrimary) {
     currentWorker = cluster.fork();
 
     const child = currentWorker.process;
-    if (child?.stdout) child.stdout.pipe(process.stdout);
-    if (child?.stderr) child.stderr.pipe(process.stderr);
+    if (child?.stdout) {
+      child.stdout.pipe(process.stdout);
+    }
+    if (child?.stderr) {
+      child.stderr.pipe(process.stderr);
+    }
 
     currentWorker.once('exit', (code, signal) => {
       currentWorker = null;
@@ -149,3 +155,8 @@ if (!cluster.isPrimary) {
 
   start();
 }
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

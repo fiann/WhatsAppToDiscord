@@ -1,12 +1,13 @@
 {
   "name": "wa2dc",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "WhatsAppToDiscord is a Discord bot that uses WhatsApp Web as a bridge between Discord and WhatsApp",
   "type": "module",
   "main": "src/runner.js",
   "scripts": {
     "start": "node src/runner.js",
     "docs": "docsify serve docs",
+    "test": "node --test",
     "lint": "eslint src --ext .js --max-warnings=0"
   },
   "author": "arespawn (forked from Fatih Kilic)",
@@ -22,7 +23,8 @@
     "link-preview-js": "^3.2.0",
     "pino": "^8.21.0",
     "pino-pretty": "^13.1.2",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "undici": "^6.19.8"
   },
   "devDependencies": {
     "docsify-cli": "^4.4.4",
@@ -33,15 +35,7 @@
     "pkg": "^5.8.1",
     "prettier": "^2.8.8"
   },
-  "pkg": {
-    "scripts": [
-      "node_modules/jimp/**/*",
-      "node_modules/@jimp/**/*"
-    ],
-    "assets": [
-      "node_modules/jimp/fonts/**/*"
-    ]
-  },
+  "pkg": {},
   "overrides": {
     "form-data": "4.0.5",
     "sharp": {

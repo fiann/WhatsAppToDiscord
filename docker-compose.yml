@@ -1,8 +1,8 @@
 name: wa2dc
 services:
   wa2dc:
-    # Use :unstable if you explicitly want prerelease builds
-    image: ghcr.io/arespawn/whatsapptodiscord:stable
+    # Use :unstable if you explicitly want prerelease builds (default: :latest)
+    image: ghcr.io/arespawn/whatsapptodiscord:latest
     container_name: wa2dc
     volumes:
       - ./storage:/usr/local/WA2DC/storage
