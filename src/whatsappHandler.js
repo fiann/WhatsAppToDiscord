@@ -549,6 +549,10 @@ const connectToWhatsApp = async (retry = 1) => {
                 storeMessage(rawMessage);
                 if (!utils.whatsapp.inWhitelist(rawMessage) || !utils.whatsapp.sentAfterStart(rawMessage) || !messageType) continue;
 
+                if (utils.whatsapp.isStatusBroadcast(rawMessage) && !state.settings.MirrorWAStatuses) {
+                    continue;
+                }
+
                 if (messageType === 'pollUpdateMessage') {
                     const handled = await handlePollUpdateMessage(client, rawMessage);
                     if (handled) continue;

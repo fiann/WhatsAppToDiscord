@@ -129,7 +129,7 @@ Turn read receipts on or off entirely.
 Pick the delivery style when read receipts are enabled (DM, short channel reply, or ☑️ reaction).
 
 ### `/enablechangenotifications` / `/disablechangenotifications`
-Toggle profile-picture / status-change alerts.
+Toggle profile-picture / status-change alerts and WhatsApp Status (stories) mirroring (posted into the `status@broadcast` / `#status` channel).
 
 ### `/oneway`
 Restrict the bridge to one direction or keep it bidirectional.  

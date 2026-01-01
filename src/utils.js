@@ -1016,23 +1016,43 @@ const updater = {
       return '';
     }
 
+    const maxLength = 2000;
     const channel = updateInfo.channel || 'stable';
     const header = `A new ${channel} version is available ${updateInfo.currVer} -> ${updateInfo.version}.`;
-    const lines = [
-      header,
-      `See ${updateInfo.url}`,
-      `Changelog: ${updateInfo.changes}`,
-    ];
+    const urlLine = updateInfo.url ? `See ${updateInfo.url}` : null;
+    const footer = updateInfo.canSelfUpdate
+      ? 'Use /update or the buttons below to install, or /skipupdate to ignore.'
+      : 'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart. Use Skip Update to dismiss this reminder.';
 
-    if (updateInfo.canSelfUpdate) {
-      lines.push('Use /update or the buttons below to install, or /skipupdate to ignore.');
-    } else {
-      lines.push(
-        'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart. Use Skip Update to dismiss this reminder.'
-      );
+    const rawChanges = typeof updateInfo.changes === 'string'
+      ? updateInfo.changes
+      : String(updateInfo.changes ?? '');
+    const changes = (rawChanges || 'No changelog provided.')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '')
+      .trim() || 'No changelog provided.';
+
+    const prefixLines = [header, urlLine].filter(Boolean);
+    const prefix = `${prefixLines.join('\n')}\nChangelog: `;
+    const suffix = `\n${footer}`;
+    const available = maxLength - prefix.length - suffix.length;
+
+    if (available <= 0) {
+      return prefixLines.concat(footer).join('\n').slice(0, maxLength);
     }
 
-    return lines.join('\n');
+    let snippet = changes;
+    if (snippet.length > available) {
+      const ellipsis = '...';
+      if (available <= ellipsis.length) {
+        snippet = snippet.slice(0, available);
+      } else {
+        const sliceLength = available - ellipsis.length;
+        snippet = `${snippet.slice(0, sliceLength)}${ellipsis}`;
+      }
+    }
+
+    return `${prefix}${snippet}${suffix}`;
   },
 
   publicKey: '-----BEGIN PUBLIC KEY-----\n'
@@ -1870,10 +1890,14 @@ const discord = {
     }
   },
   async syncUpdatePrompt() {
-    if (state.updateInfo) {
-      await this.ensureUpdatePrompt(state.updateInfo);
-    } else {
-      await this.clearUpdatePrompt();
+    try {
+      if (state.updateInfo) {
+        await this.ensureUpdatePrompt(state.updateInfo);
+      } else {
+        await this.clearUpdatePrompt();
+      }
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to sync update prompt');
     }
   },
   async _fetchRollbackPromptMessage() {
@@ -1952,15 +1976,19 @@ const discord = {
     }
   },
   async syncRollbackPrompt() {
-    if (updater.isNode) {
-      await this.clearRollbackPrompt();
-      return;
-    }
-    const hasBackup = await updater.hasBackup();
-    if (hasBackup) {
-      await this.ensureRollbackPrompt();
-    } else {
-      await this.clearRollbackPrompt();
+    try {
+      if (updater.isNode) {
+        await this.clearRollbackPrompt();
+        return;
+      }
+      const hasBackup = await updater.hasBackup();
+      if (hasBackup) {
+        await this.ensureRollbackPrompt();
+      } else {
+        await this.clearRollbackPrompt();
+      }
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to sync rollback prompt');
     }
   },
   async findAvailableName(dir, fileName) {
@@ -2159,6 +2187,10 @@ const whatsapp = {
     if (remoteJidAlt && !candidates.includes(remoteJidAlt)) candidates.push(remoteJidAlt);
     return candidates;
   },
+  isStatusBroadcast(rawMsg = {}) {
+    const [candidatePrimary] = this.getChatJidCandidates(rawMsg);
+    return candidatePrimary === 'status@broadcast';
+  },
   isMe(myJID, jid) {
     return jid.startsWith(this.jidToPhone(myJID)) && !jid.endsWith('@g.us');
   },
@@ -2251,6 +2283,9 @@ const whatsapp = {
     return [preferred, fallback];
   },
   async getChannelJid(rawMsg) {
+    if (this.isStatusBroadcast(rawMsg)) {
+      return 'status@broadcast';
+    }
     const [candidatePrimary, candidateAlternate] = this.getChatJidCandidates(rawMsg);
     const [primary, alternate] = await this.hydrateJidPair(candidatePrimary, candidateAlternate);
     return this.resolveKnownJid(primary, alternate);
@@ -2271,7 +2306,8 @@ const whatsapp = {
     return this.jidToName(await this.getSenderJid(rawMsg, rawMsg.key.fromMe), rawMsg.pushName);
   },
   isGroup(rawMsg) {
-    return rawMsg.key.participant != null;
+    if (this.isStatusBroadcast(rawMsg)) return false;
+    return rawMsg?.key?.participant != null;
   },
   isForwarded(msg) {
     return msg?.contextInfo?.isForwarded;
@@ -2493,12 +2529,16 @@ const whatsapp = {
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;
     for (const contact of contacts) {
-      const name = contact?.name
-        || contact?.subject
-        || contact?.verifiedName
-        || contact?.notify
-        || contact?.pushName;
-      if (!name) continue;
+      const nameCandidates = [
+        { value: contact?.subject, rank: 0 },
+        { value: contact?.name, rank: 0 },
+        { value: contact?.verifiedName, rank: 1 },
+        { value: contact?.notify, rank: 2 },
+        { value: contact?.pushName, rank: 3 },
+      ];
+      const selectedName = nameCandidates.find((entry) => entry.value);
+      if (!selectedName) continue;
+      const name = selectedName.value;
       const id = this.formatJid(contact?.id);
       const pnFromField = contact?.phoneNumber
         ? this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`)
@@ -2521,8 +2561,16 @@ const whatsapp = {
 
       const targetId = preferredId || alternateId;
       if (!targetId) continue;
-      state.waClient.contacts[targetId] = name;
+
+      const existingName = state.contacts[targetId];
+      const existingFallback = typeof existingName === 'string' && /^\d+$/.test(existingName.trim());
+      const shouldOverwrite = !existingName || existingFallback || selectedName.rank <= 1;
+      if (!shouldOverwrite) continue;
+
       state.contacts[targetId] = name;
+      if (state.waClient?.contacts) {
+        state.waClient.contacts[targetId] = name;
+      }
     }
   },
   createDocumentContent(attachment) {

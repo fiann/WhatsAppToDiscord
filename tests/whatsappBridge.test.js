@@ -26,6 +26,7 @@ const setupWhatsAppHarness = async ({
 } = {}) => {
   const originalLogger = state.logger;
   const originalOneWay = state.settings.oneWay;
+  const originalMirrorWAStatuses = state.settings.MirrorWAStatuses;
   const originalLastMessages = state.lastMessages;
   const originalStartTime = state.startTime;
   const originalSentMessages = snapshotSet(state.sentMessages);
@@ -60,6 +61,7 @@ const setupWhatsAppHarness = async ({
       getMessageType: (...args) => getMessageType(...args),
       inWhitelist: (...args) => inWhitelist(...args),
       sentAfterStart: (...args) => sentAfterStart(...args),
+      isStatusBroadcast: (raw) => raw?.key?.remoteJid === 'status@broadcast',
       getMessage: (raw) => ['conversation', { text: raw.message }],
       getSenderName: async () => 'Tester',
       getContent: (message) => message.text,
@@ -136,6 +138,7 @@ const setupWhatsAppHarness = async ({
     const cleanup = () => {
       state.logger = originalLogger;
       state.settings.oneWay = originalOneWay;
+      state.settings.MirrorWAStatuses = originalMirrorWAStatuses;
       state.lastMessages = originalLastMessages;
       state.startTime = originalStartTime;
       restoreSet(state.sentMessages, originalSentMessages);
@@ -159,6 +162,7 @@ const setupWhatsAppHarness = async ({
   } catch (err) {
     state.logger = originalLogger;
     state.settings.oneWay = originalOneWay;
+    state.settings.MirrorWAStatuses = originalMirrorWAStatuses;
     state.lastMessages = originalLastMessages;
     state.startTime = originalStartTime;
     restoreSet(state.sentMessages, originalSentMessages);
@@ -212,6 +216,28 @@ test('WhatsApp whitelist gating prevents emitting Discord events', async () => {
     await delay(0);
     assert.equal(harness.forwarded.messages.length, 0);
   } finally {
+    harness.cleanup();
+  }
+});
+
+test('WhatsApp Status messages are skipped when status mirroring is disabled', async () => {
+  const harness = await setupWhatsAppHarness();
+  const originalMirrorWAStatuses = state.settings.MirrorWAStatuses;
+  try {
+    state.settings.MirrorWAStatuses = false;
+    harness.fakeClient.ev.emit('messages.upsert', {
+      type: 'notify',
+      messages: [{
+        key: { id: 'status-1', remoteJid: 'status@broadcast' },
+        message: 'status update',
+      }],
+    });
+
+    await delay(0);
+
+    assert.equal(harness.forwarded.messages.length, 0);
+  } finally {
+    state.settings.MirrorWAStatuses = originalMirrorWAStatuses;
     harness.cleanup();
   }
 });

@@ -1517,17 +1517,19 @@ const commandHandlers = {
     },
   },
   enablechangenotifications: {
-    description: 'Enable profile/status change notifications.',
+    description: 'Enable profile/status change notifications (and WhatsApp Status mirroring).',
     async execute(ctx) {
       state.settings.ChangeNotifications = true;
-      await ctx.reply('Enabled profile picture change and status update notifications.');
+      state.settings.MirrorWAStatuses = true;
+      await ctx.reply('Enabled profile picture change notifications, status update notifications, and WhatsApp Status mirroring.');
     },
   },
   disablechangenotifications: {
-    description: 'Disable profile/status change notifications.',
+    description: 'Disable profile/status change notifications (and WhatsApp Status mirroring).',
     async execute(ctx) {
       state.settings.ChangeNotifications = false;
-      await ctx.reply('Disabled profile picture change and status update notifications.');
+      state.settings.MirrorWAStatuses = false;
+      await ctx.reply('Disabled profile picture change notifications, status update notifications, and WhatsApp Status mirroring.');
     },
   },
   autosaveinterval: {

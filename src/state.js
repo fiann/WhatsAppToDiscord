@@ -22,6 +22,7 @@ const state = {
     HttpsCertPath: '',
     Publish: false,
     ChangeNotifications: false,
+    MirrorWAStatuses: true,
     autoSaveInterval: 5 * 60,
     lastMessageStorage: 500,
     oneWay: 0b11,

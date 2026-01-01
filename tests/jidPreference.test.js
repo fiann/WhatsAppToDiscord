@@ -172,3 +172,47 @@ test('WhatsApp sendMessage wrapper prefers PN when available', async () => {
   }
 });
 
+test('getChannelJid keeps status@broadcast for WhatsApp Status messages', async () => {
+  const originalWaClient = state.waClient;
+  const originalLogger = state.logger;
+  const originalChats = snapshotObject(state.chats);
+  const originalContacts = snapshotObject(state.contacts);
+  const originalWhitelist = snapshotWhitelist();
+
+  try {
+    state.logger = { warn() {}, debug() {} };
+    restoreObject(state.chats, {});
+    restoreObject(state.contacts, {});
+    state.settings.Whitelist = [];
+
+    state.chats['161040050426060@lid'] = { channelId: 'chan-lid' };
+
+    state.waClient = {
+      user: { id: '0@s.whatsapp.net' },
+      signalRepository: {},
+      contacts: state.contacts,
+    };
+
+    const channelJid = await utils.whatsapp.getChannelJid({
+      key: {
+        remoteJid: 'status@broadcast',
+        remoteJidAlt: '161040050426060@lid',
+        participant: '14155550123@s.whatsapp.net',
+      },
+    });
+
+    assert.equal(channelJid, 'status@broadcast');
+    assert.equal(utils.whatsapp.isGroup({
+      key: {
+        remoteJid: 'status@broadcast',
+        participant: '14155550123@s.whatsapp.net',
+      },
+    }), false);
+  } finally {
+    state.waClient = originalWaClient;
+    state.logger = originalLogger;
+    restoreObject(state.chats, originalChats);
+    restoreObject(state.contacts, originalContacts);
+    state.settings.Whitelist = originalWhitelist;
+  }
+});
