@@ -59,7 +59,7 @@ Alternatively, you can run the bot using Docker. Copy `.env.example` to `.env`, 
 docker compose up -d
 ```
 
-The compose file mounts the `storage` directory so data is kept between container restarts. It uses the `stable` tag by default; switch to `unstable` if you explicitly want prerelease builds.
+The compose file mounts the `storage` directory so data is kept between container restarts. It uses the `latest` tag (stable channel) by default; switch to `unstable` if you explicitly want prerelease builds.
 
 To update a running container, pull the new image and recreate the service:
 
@@ -71,7 +71,7 @@ This keeps you in control of when updates are applied instead of auto-updating.
 
 ## Updates and release channels
 
-- Images are pushed to the GitHub Container Registry on every release with immutable version tags plus moving `stable` (also `latest`) and `unstable` channels.
+- Images are pushed to the GitHub Container Registry on every release with immutable version tags plus moving `latest` (stable) and `unstable` channels.
 - The bot checks for new releases every couple of days. Set `WA2DC_UPDATE_CHANNEL=unstable` to be notified about prereleases; otherwise it follows the stable channel.
 - Packaged binaries can apply updates after you confirm with the `update` command. Set `WA2DC_KEEP_OLD_BINARY=1` to keep the previous executable as a rollback.
 - Switch channels from the control channel with `updateChannel stable|unstable`.
