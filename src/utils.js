@@ -1016,23 +1016,43 @@ const updater = {
       return '';
     }
 
+    const maxLength = 2000;
     const channel = updateInfo.channel || 'stable';
     const header = `A new ${channel} version is available ${updateInfo.currVer} -> ${updateInfo.version}.`;
-    const lines = [
-      header,
-      `See ${updateInfo.url}`,
-      `Changelog: ${updateInfo.changes}`,
-    ];
+    const urlLine = updateInfo.url ? `See ${updateInfo.url}` : null;
+    const footer = updateInfo.canSelfUpdate
+      ? 'Use /update or the buttons below to install, or /skipupdate to ignore.'
+      : 'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart. Use Skip Update to dismiss this reminder.';
 
-    if (updateInfo.canSelfUpdate) {
-      lines.push('Use /update or the buttons below to install, or /skipupdate to ignore.');
-    } else {
-      lines.push(
-        'This instance cannot self-update (Docker/source install). Pull the new image or binary for this release and restart. Use Skip Update to dismiss this reminder.'
-      );
+    const rawChanges = typeof updateInfo.changes === 'string'
+      ? updateInfo.changes
+      : String(updateInfo.changes ?? '');
+    const changes = (rawChanges || 'No changelog provided.')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '')
+      .trim() || 'No changelog provided.';
+
+    const prefixLines = [header, urlLine].filter(Boolean);
+    const prefix = `${prefixLines.join('\n')}\nChangelog: `;
+    const suffix = `\n${footer}`;
+    const available = maxLength - prefix.length - suffix.length;
+
+    if (available <= 0) {
+      return prefixLines.concat(footer).join('\n').slice(0, maxLength);
     }
 
-    return lines.join('\n');
+    let snippet = changes;
+    if (snippet.length > available) {
+      const ellipsis = '...';
+      if (available <= ellipsis.length) {
+        snippet = snippet.slice(0, available);
+      } else {
+        const sliceLength = available - ellipsis.length;
+        snippet = `${snippet.slice(0, sliceLength)}${ellipsis}`;
+      }
+    }
+
+    return `${prefix}${snippet}${suffix}`;
   },
 
   publicKey: '-----BEGIN PUBLIC KEY-----\n'
@@ -1870,10 +1890,14 @@ const discord = {
     }
   },
   async syncUpdatePrompt() {
-    if (state.updateInfo) {
-      await this.ensureUpdatePrompt(state.updateInfo);
-    } else {
-      await this.clearUpdatePrompt();
+    try {
+      if (state.updateInfo) {
+        await this.ensureUpdatePrompt(state.updateInfo);
+      } else {
+        await this.clearUpdatePrompt();
+      }
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to sync update prompt');
     }
   },
   async _fetchRollbackPromptMessage() {
@@ -1952,15 +1976,19 @@ const discord = {
     }
   },
   async syncRollbackPrompt() {
-    if (updater.isNode) {
-      await this.clearRollbackPrompt();
-      return;
-    }
-    const hasBackup = await updater.hasBackup();
-    if (hasBackup) {
-      await this.ensureRollbackPrompt();
-    } else {
-      await this.clearRollbackPrompt();
+    try {
+      if (updater.isNode) {
+        await this.clearRollbackPrompt();
+        return;
+      }
+      const hasBackup = await updater.hasBackup();
+      if (hasBackup) {
+        await this.ensureRollbackPrompt();
+      } else {
+        await this.clearRollbackPrompt();
+      }
+    } catch (err) {
+      state.logger?.warn({ err }, 'Failed to sync rollback prompt');
     }
   },
   async findAvailableName(dir, fileName) {
