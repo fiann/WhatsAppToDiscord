@@ -2187,6 +2187,10 @@ const whatsapp = {
     if (remoteJidAlt && !candidates.includes(remoteJidAlt)) candidates.push(remoteJidAlt);
     return candidates;
   },
+  isStatusBroadcast(rawMsg = {}) {
+    const [candidatePrimary] = this.getChatJidCandidates(rawMsg);
+    return candidatePrimary === 'status@broadcast';
+  },
   isMe(myJID, jid) {
     return jid.startsWith(this.jidToPhone(myJID)) && !jid.endsWith('@g.us');
   },
@@ -2279,6 +2283,9 @@ const whatsapp = {
     return [preferred, fallback];
   },
   async getChannelJid(rawMsg) {
+    if (this.isStatusBroadcast(rawMsg)) {
+      return 'status@broadcast';
+    }
     const [candidatePrimary, candidateAlternate] = this.getChatJidCandidates(rawMsg);
     const [primary, alternate] = await this.hydrateJidPair(candidatePrimary, candidateAlternate);
     return this.resolveKnownJid(primary, alternate);
@@ -2299,7 +2306,8 @@ const whatsapp = {
     return this.jidToName(await this.getSenderJid(rawMsg, rawMsg.key.fromMe), rawMsg.pushName);
   },
   isGroup(rawMsg) {
-    return rawMsg.key.participant != null;
+    if (this.isStatusBroadcast(rawMsg)) return false;
+    return rawMsg?.key?.participant != null;
   },
   isForwarded(msg) {
     return msg?.contextInfo?.isForwarded;
@@ -2521,12 +2529,16 @@ const whatsapp = {
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;
     for (const contact of contacts) {
-      const name = contact?.name
-        || contact?.subject
-        || contact?.verifiedName
-        || contact?.notify
-        || contact?.pushName;
-      if (!name) continue;
+      const nameCandidates = [
+        { value: contact?.subject, rank: 0 },
+        { value: contact?.name, rank: 0 },
+        { value: contact?.verifiedName, rank: 1 },
+        { value: contact?.notify, rank: 2 },
+        { value: contact?.pushName, rank: 3 },
+      ];
+      const selectedName = nameCandidates.find((entry) => entry.value);
+      if (!selectedName) continue;
+      const name = selectedName.value;
       const id = this.formatJid(contact?.id);
       const pnFromField = contact?.phoneNumber
         ? this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`)
@@ -2549,8 +2561,16 @@ const whatsapp = {
 
       const targetId = preferredId || alternateId;
       if (!targetId) continue;
-      state.waClient.contacts[targetId] = name;
+
+      const existingName = state.contacts[targetId];
+      const existingFallback = typeof existingName === 'string' && /^\d+$/.test(existingName.trim());
+      const shouldOverwrite = !existingName || existingFallback || selectedName.rank <= 1;
+      if (!shouldOverwrite) continue;
+
       state.contacts[targetId] = name;
+      if (state.waClient?.contacts) {
+        state.waClient.contacts[targetId] = name;
+      }
     }
   },
   createDocumentContent(attachment) {
