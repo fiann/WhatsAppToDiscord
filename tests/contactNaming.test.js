@@ -57,3 +57,28 @@ test('updateContacts overwrites fallback phone numbers with better names', () =>
   }
 });
 
+test('updateContacts stores names for both PN and LID when available', () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = { contacts: state.contacts, user: { id: '0@s.whatsapp.net' } };
+
+    const pnJid = '14155550123@s.whatsapp.net';
+    const lidJid = '161040050426060@lid';
+
+    utils.whatsapp.updateContacts([{
+      id: pnJid,
+      lid: lidJid,
+      notify: 'Alice Doe',
+    }]);
+
+    assert.equal(state.contacts[pnJid], 'Alice Doe');
+    assert.equal(state.contacts[lidJid], 'Alice Doe');
+    assert.equal(utils.whatsapp.jidToName(lidJid), 'Alice Doe');
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+  }
+});

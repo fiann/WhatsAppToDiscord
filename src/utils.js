@@ -2207,10 +2207,11 @@ const whatsapp = {
       return this.formatJid(trimmed);
     }
     const normalized = trimmed.toLowerCase();
-    const match = Object.keys(state.waClient.contacts)
-      .find((key) => state.waClient.contacts[key]
+    const matches = Object.keys(state.waClient.contacts)
+      .filter((key) => state.waClient.contacts[key]
         && state.waClient.contacts[key].toLowerCase().trim() === normalized);
-    return this.formatJid(match);
+    const preferred = matches.find((jid) => this.isPhoneJid(jid)) || matches[0];
+    return this.formatJid(preferred);
   },
   contacts() {
     return Object.values(state.waClient.contacts);
@@ -2562,14 +2563,21 @@ const whatsapp = {
       const targetId = preferredId || alternateId;
       if (!targetId) continue;
 
-      const existingName = state.contacts[targetId];
-      const existingFallback = typeof existingName === 'string' && /^\d+$/.test(existingName.trim());
-      const shouldOverwrite = !existingName || existingFallback || selectedName.rank <= 1;
-      if (!shouldOverwrite) continue;
+      const applyNameUpdate = (jid) => {
+        if (!jid) return;
+        const existingName = state.contacts[jid];
+        const existingFallback = typeof existingName === 'string' && /^\d+$/.test(existingName.trim());
+        const shouldOverwrite = !existingName || existingFallback || selectedName.rank <= 1;
+        if (!shouldOverwrite) return;
+        state.contacts[jid] = name;
+        if (state.waClient?.contacts) {
+          state.waClient.contacts[jid] = name;
+        }
+      };
 
-      state.contacts[targetId] = name;
-      if (state.waClient?.contacts) {
-        state.waClient.contacts[targetId] = name;
+      applyNameUpdate(targetId);
+      if (alternateId && alternateId !== targetId) {
+        applyNameUpdate(alternateId);
       }
     }
   },
