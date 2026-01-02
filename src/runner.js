@@ -125,7 +125,7 @@ async function runSupervisorWithSpawn() {
     workerStartTime = Date.now();
     currentWorker = spawn(process.execPath, [], {
       env: { ...process.env, [WORKER_ENV_FLAG]: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['inherit', 'pipe', 'pipe'],
     });
 
     currentWorker.stdout?.pipe(process.stdout);
@@ -232,8 +232,22 @@ async function main() {
     if (child?.stderr) {
       child.stderr.pipe(process.stderr);
     }
+    if (child?.stdin && process.stdin?.readable) {
+      try {
+        process.stdin.pipe(child.stdin);
+      } catch (err) {
+        logger.warn({ err }, 'Failed to forward stdin to worker');
+      }
+    }
 
     currentWorker.once('exit', (code, signal) => {
+      if (child?.stdin) {
+        try {
+          process.stdin.unpipe(child.stdin);
+        } catch {
+          // Ignore unpipe errors (worker may already be gone).
+        }
+      }
       currentWorker = null;
       handleExit(code, signal);
     });
