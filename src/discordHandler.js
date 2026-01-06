@@ -571,11 +571,11 @@ client.on('whatsappCall', async ({ call, jid }) => {
 
   if (content !== '') {
     const avatarURL = (await utils.whatsapp.getProfilePic(call)) || DEFAULT_AVATAR_URL;
-    await webhook.send({
+    await utils.discord.safeWebhookSend(webhook, {
       content,
       username: name,
       avatarURL,
-    });
+    }, jid);
   }
 });
 

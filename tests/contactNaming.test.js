@@ -82,3 +82,45 @@ test('updateContacts stores names for both PN and LID when available', () => {
     restoreObject(state.contacts, originalContacts);
   }
 });
+
+test('jidToName falls back when contact name is blank/whitespace', () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = { contacts: state.contacts, user: { id: '0@s.whatsapp.net' } };
+
+    const jid = '14155550123@s.whatsapp.net';
+    state.contacts[jid] = '   ';
+
+    assert.equal(utils.whatsapp.jidToName(jid), '14155550123');
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+  }
+});
+
+test('updateContacts ignores blank/whitespace name candidates', () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = { contacts: state.contacts, user: { id: '0@s.whatsapp.net' } };
+
+    const jid = '14155550123@s.whatsapp.net';
+    state.contacts[jid] = '14155550123';
+
+    utils.whatsapp.updateContacts([{
+      id: jid,
+      notify: '   ',
+      pushName: '',
+    }]);
+
+    assert.equal(state.contacts[jid], '14155550123');
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+  }
+});

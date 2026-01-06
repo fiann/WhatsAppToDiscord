@@ -1445,6 +1445,24 @@ const discord = {
     return webhook;
   },
   async safeWebhookSend(webhook, args, jid) {
+    const normalizeWebhookUsername = (value) => {
+      if (typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      return trimmed.length > 80 ? trimmed.slice(0, 80) : trimmed;
+    };
+
+    if (args && typeof args === 'object' && Object.prototype.hasOwnProperty.call(args, 'username')) {
+      const normalized = normalizeWebhookUsername(args.username);
+      if (normalized == null) {
+        // Avoid sending invalid webhook username (Discord rejects empty/whitespace usernames).
+        args = { ...args };
+        delete args.username;
+      } else if (normalized !== args.username) {
+        args = { ...args, username: normalized };
+      }
+    }
+
     const configuredRetriesRaw = state.settings?.DiscordUploadRetryAttempts;
     const configuredRetries = Number(configuredRetriesRaw);
     const maxAbortRetries = Number.isFinite(configuredRetries) && configuredRetries >= 1
@@ -2196,7 +2214,14 @@ const whatsapp = {
   },
   jidToName(jid, pushName) {
     if (this.isMe(state.waClient.user.id, jid)) { return 'You'; }
-    return state.waClient.contacts[this.formatJid(jid)] || pushName || this.jidToPhone(jid);
+    const contactName = state.waClient.contacts[this.formatJid(jid)];
+    const candidates = [contactName, pushName, this.jidToPhone(jid)];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      const trimmed = candidate.trim();
+      if (trimmed) return trimmed;
+    }
+    return 'Unknown';
   },
   toJid(name) {
     if (!name) return null;
@@ -2537,9 +2562,16 @@ const whatsapp = {
         { value: contact?.notify, rank: 2 },
         { value: contact?.pushName, rank: 3 },
       ];
-      const selectedName = nameCandidates.find((entry) => entry.value);
+      const normalizeCandidateName = (value) => {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        return trimmed ? trimmed : null;
+      };
+      const selectedName = nameCandidates
+        .map((entry) => ({ ...entry, normalized: normalizeCandidateName(entry.value) }))
+        .find((entry) => entry.normalized);
       if (!selectedName) continue;
-      const name = selectedName.value;
+      const name = selectedName.normalized;
       const id = this.formatJid(contact?.id);
       const pnFromField = contact?.phoneNumber
         ? this.formatJid(`${contact.phoneNumber}@s.whatsapp.net`)
