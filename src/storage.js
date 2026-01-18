@@ -1,6 +1,7 @@
 import readline from 'readline';
 import fs from 'fs/promises';
 import path from 'path';
+import net from 'net';
 import discordJs from 'discord.js';
 
 import state from './state.js';
@@ -58,6 +59,10 @@ const storage = {
     }
   },
 
+  async saveSettings() {
+    await this.upsert(this._settingsName, JSON.stringify(state.settings));
+  },
+
   async get(name) {
     const key = sanitizeStorageKey(name);
     return fs.readFile(path.join(this._storageDir, key)).catch(() => null)
@@ -83,7 +88,31 @@ const storage = {
     }
 
     try {
-      const settings = Object.assign(state.settings, JSON.parse(result));
+      const parsed = JSON.parse(result);
+
+      delete parsed.LocalDownloadServerBasicAuthEnabled;
+      delete parsed.LocalDownloadServerBasicAuthUsername;
+      delete parsed.LocalDownloadServerBasicAuthPassword;
+
+      if (!Object.prototype.hasOwnProperty.call(parsed, 'LocalDownloadServerBindHost')) {
+        const hostRaw = parsed.LocalDownloadServerHost;
+        const host = typeof hostRaw === 'string' ? hostRaw.trim() : '';
+        if (host) {
+          const lower = host.toLowerCase();
+          if (host === '0.0.0.0' || host === '::') {
+            parsed.LocalDownloadServerBindHost = host;
+            parsed.LocalDownloadServerHost = 'localhost';
+          } else if (lower === 'localhost' || lower === '127.0.0.1' || lower === '::1') {
+            parsed.LocalDownloadServerBindHost = host;
+          } else if (net.isIP(host)) {
+            parsed.LocalDownloadServerBindHost = host;
+          } else {
+            parsed.LocalDownloadServerBindHost = '0.0.0.0';
+          }
+        }
+      }
+
+      const settings = Object.assign(state.settings, parsed);
       if (settings.Token === '') return setup.firstRun();
       return settings;
     } catch (err) {
