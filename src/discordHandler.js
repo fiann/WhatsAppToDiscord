@@ -7,6 +7,7 @@ import storage from './storage.js';
 import groupMetadataCache from './groupMetadataCache.js';
 import messageStore from './messageStore.js';
 import { createDiscordClient } from './clientFactories.js';
+import { resolveRestartFlagPath } from './runnerLogic.js';
 
 const { Intents, Constants, MessageActionRow, MessageButton } = discordJs;
 
@@ -34,6 +35,65 @@ const UPDATE_BUTTON_IDS = utils.discord.updateButtonIds;
 const ROLLBACK_BUTTON_ID = utils.discord.rollbackButtonId;
 const bridgePinnedMessages = new Set();
 const pinExpiryTimers = new Map();
+let restartInProgress = false;
+
+const requestSafeRestart = async (ctx, { message = 'Restarting...', exitCode = 0 } = {}) => {
+  if (restartInProgress) {
+    await ctx.reply('Restart already in progress.');
+    return;
+  }
+  restartInProgress = true;
+
+  try {
+    await storage.save();
+  } catch (err) {
+    restartInProgress = false;
+    state.logger?.error({ err }, 'Failed to save state before restart');
+    await ctx.reply('Failed to save state; restart aborted. Check logs.');
+    return;
+  }
+
+  const flagPath = resolveRestartFlagPath(process.env.WA2DC_RESTART_FLAG_PATH, process.cwd());
+  let flagWritten = true;
+  let resolvedExitCode = exitCode;
+  try {
+    await fs.promises.writeFile(flagPath, '');
+  } catch (err) {
+    flagWritten = false;
+    resolvedExitCode = resolvedExitCode === 0 ? 1 : resolvedExitCode;
+    state.logger?.error({ err, flagPath }, 'Failed to write restart flag; falling back to crash restart');
+  }
+
+  const suffix = flagWritten ? '' : ' (restart flag write failed; falling back to crash restart)';
+  try {
+    await ctx.reply(`${message}${suffix}`);
+  } catch (err) {
+    state.logger?.warn?.({ err }, 'Failed to send restart confirmation message');
+  }
+
+  try {
+    utils.stopDownloadServer();
+  } catch {
+    /* ignore */
+  }
+  try {
+    state.waClient?.end?.(new Error('Restart requested'));
+  } catch {
+    /* ignore */
+  }
+  try {
+    state.waClient?.ws?.close?.();
+  } catch {
+    /* ignore */
+  }
+  try {
+    state.dcClient?.destroy?.();
+  } catch {
+    /* ignore */
+  }
+
+  setTimeout(() => process.exit(resolvedExitCode), 250);
+};
 
 const getPinDurationSeconds = () => {
   const configured = Number(state.settings.PinDurationSeconds);
@@ -185,6 +245,7 @@ class CommandContext {
 const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) => {
   let msgContent = '';
   const files = [];
+  const largeFiles = [];
   let components = [];
   const webhook = await utils.discord.getOrCreateChannel(message.channelJid);
   const avatarURL = message.profilePic || DEFAULT_AVATAR_URL;
@@ -221,7 +282,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
 
     if (message.quote.file) {
       if (message.quote.file.largeFile && state.settings.LocalDownloads) {
-        msgContent += await utils.discord.downloadLargeFile(message.quote.file);
+        largeFiles.push(message.quote.file);
       } else if (message.quote.file === -1 && !state.settings.LocalDownloads) {
         msgContent += "WA2DC Attention: Received a file, but it's over Discord's upload limit. Check WhatsApp on your phone or enable local downloads.";
       } else {
@@ -235,14 +296,18 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
 
   for (const file of mediaFiles) {
     if (file.largeFile && state.settings.LocalDownloads) {
-      // eslint-disable-next-line no-await-in-loop
-      msgContent += await utils.discord.downloadLargeFile(file);
+      largeFiles.push(file);
     }
     else if (file === -1 && !state.settings.LocalDownloads) {
       msgContent += "WA2DC Attention: Received a file, but it's over Discord's upload limit. Check WhatsApp on your phone or enable local downloads.";
     } else if (file !== -1) {
       files.push(file);
     }
+  }
+
+  if (!msgContent && !files.length && largeFiles.length) {
+    const count = largeFiles.length;
+    msgContent = `WA2DC: Received ${count} attachment${count === 1 ? '' : 's'} larger than Discord's upload limit. Download link${count === 1 ? '' : 's'} will be posted shortly.`;
   }
 
   if (msgContent) {
@@ -332,6 +397,42 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
           state.lastMessages[lastDcMessage.id] = message.id;
         }
       }
+    }
+
+    if (largeFiles.length) {
+      const placeholders = [];
+      for (const file of largeFiles) {
+        // eslint-disable-next-line no-await-in-loop
+        const placeholder = await utils.discord.safeWebhookSend(webhook, {
+          content: `WA2DC: downloading "${file?.name || 'attachment'}"...`,
+          username: message.name,
+          avatarURL,
+          components: [],
+        }, message.channelJid);
+        placeholders.push(placeholder);
+      }
+
+      void (async () => {
+        for (let i = 0; i < largeFiles.length; i += 1) {
+          const file = largeFiles[i];
+          const placeholder = placeholders[i];
+          let downloadMessage;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            downloadMessage = await utils.discord.downloadLargeFile(file);
+          } catch (err) {
+            state.logger?.error({ err }, 'Failed to download large WhatsApp attachment for local serving');
+            downloadMessage = `WA2DC Attention: Failed to download "${file?.name || 'attachment'}". Please check WhatsApp.`;
+          }
+          const content = String(downloadMessage || '').replace(/^\n+/, '').trim() || 'WA2DC Attention: Download completed, but no message was generated.';
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await utils.discord.safeWebhookEdit(webhook, placeholder.id, { content }, message.channelJid);
+          } catch (err) {
+            state.logger?.warn?.({ err }, 'Failed to update local-download placeholder message');
+          }
+        }
+      })();
     }
   }
 };
@@ -1176,74 +1277,84 @@ const commandHandlers = {
       }
     },
   },
-  enabledcprefix: {
-    description: 'Enable Discord username prefixes.',
+  dcprefix: {
+    description: 'Toggle Discord username prefixes.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether Discord username prefixes should be used.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.DiscordPrefix = true;
-      await ctx.reply('Discord username prefix enabled!');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.DiscordPrefix = enabled;
+      await ctx.reply(`Discord username prefix is set to ${state.settings.DiscordPrefix}.`);
     },
   },
-  disabledcprefix: {
-    description: 'Disable Discord username prefixes.',
+  waprefix: {
+    description: 'Toggle WhatsApp name prefixes on Discord.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether WhatsApp sender names should be prepended inside Discord messages.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.DiscordPrefix = false;
-      await ctx.reply('Discord username prefix disabled!');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.WAGroupPrefix = enabled;
+      await ctx.reply(`WhatsApp name prefix is set to ${state.settings.WAGroupPrefix}.`);
     },
   },
-  enablewaprefix: {
-    description: 'Enable WhatsApp name prefixes on Discord.',
+  waupload: {
+    description: 'Toggle uploading attachments to WhatsApp.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether Discord attachments should be uploaded to WhatsApp (vs sending as links).',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.WAGroupPrefix = true;
-      await ctx.reply('WhatsApp name prefix enabled!');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.UploadAttachments = enabled;
+      await ctx.reply(`Uploading attachments to WhatsApp is set to ${state.settings.UploadAttachments}.`);
     },
   },
-  disablewaprefix: {
-    description: 'Disable WhatsApp name prefixes on Discord.',
+  deletes: {
+    description: 'Toggle mirrored message deletions.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether message deletions should be mirrored between Discord and WhatsApp.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.WAGroupPrefix = false;
-      await ctx.reply('WhatsApp name prefix disabled!');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.DeleteMessages = enabled;
+      await ctx.reply(`Mirrored message deletions are set to ${state.settings.DeleteMessages}.`);
     },
   },
-  enablewaupload: {
-    description: 'Enable uploading attachments to WhatsApp.',
+  readreceipts: {
+    description: 'Toggle read receipts.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether read receipts are enabled.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.UploadAttachments = true;
-      await ctx.reply('Enabled uploading files to WhatsApp!');
-    },
-  },
-  disablewaupload: {
-    description: 'Disable uploading attachments to WhatsApp.',
-    async execute(ctx) {
-      state.settings.UploadAttachments = false;
-      await ctx.reply('Disabled uploading files to WhatsApp!');
-    },
-  },
-  enabledeletes: {
-    description: 'Enable message delete syncing.',
-    async execute(ctx) {
-      state.settings.DeleteMessages = true;
-      await ctx.reply('Enabled message delete syncing!');
-    },
-  },
-  disabledeletes: {
-    description: 'Disable message delete syncing.',
-    async execute(ctx) {
-      state.settings.DeleteMessages = false;
-      await ctx.reply('Disabled message delete syncing!');
-    },
-  },
-  enablereadreceipts: {
-    description: 'Enable read receipts.',
-    async execute(ctx) {
-      state.settings.ReadReceipts = true;
-      await ctx.reply('Enabled read receipts!');
-    },
-  },
-  disablereadreceipts: {
-    description: 'Disable read receipts.',
-    async execute(ctx) {
-      state.settings.ReadReceipts = false;
-      await ctx.reply('Disabled read receipts!');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.ReadReceipts = enabled;
+      await ctx.reply(`Read receipts are set to ${state.settings.ReadReceipts}.`);
     },
   },
   dmreadreceipts: {
@@ -1305,18 +1416,20 @@ const commandHandlers = {
       await ctx.reply('Re-synced!');
     },
   },
-  enablelocaldownloads: {
-    description: 'Enable local downloads for large files.',
+  localdownloads: {
+    description: 'Toggle local downloads for large files.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether large WhatsApp attachments should be downloaded locally.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.LocalDownloads = true;
-      await ctx.reply('Enabled local downloads. You can now download files larger than Discord\'s upload limit.');
-    },
-  },
-  disablelocaldownloads: {
-    description: 'Disable local downloads for large files.',
-    async execute(ctx) {
-      state.settings.LocalDownloads = false;
-      await ctx.reply('Disabled local downloads. You won\'t be able to download files larger than Discord\'s upload limit.');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.LocalDownloads = enabled;
+      await ctx.reply(`Local downloads are set to ${state.settings.LocalDownloads}.`);
     },
   },
   getdownloadmessage: {
@@ -1403,20 +1516,27 @@ const commandHandlers = {
       }
     },
   },
-  enablelocaldownloadserver: {
-    description: 'Start the local download server.',
+  localdownloadserver: {
+    description: 'Toggle the local download server.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether the local download server should be running.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.LocalDownloadServer = true;
-      utils.ensureDownloadServer();
-      await ctx.reply(`Enabled local download server on port ${state.settings.LocalDownloadServerPort}.`);
-    },
-  },
-  disablelocaldownloadserver: {
-    description: 'Stop the local download server.',
-    async execute(ctx) {
-      state.settings.LocalDownloadServer = false;
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.LocalDownloadServer = enabled;
+      if (enabled) {
+        utils.ensureDownloadServer();
+        await ctx.reply(`Local download server is set to true (port ${state.settings.LocalDownloadServerPort}).`);
+        return;
+      }
+
       utils.stopDownloadServer();
-      await ctx.reply('Disabled local download server.');
+      await ctx.reply('Local download server is set to false.');
     },
   },
   setlocaldownloadserverport: {
@@ -1459,22 +1579,100 @@ const commandHandlers = {
       await ctx.reply(`Set local download server host to ${host}.`);
     },
   },
-  enablehttpsdownloadserver: {
-    description: 'Enable HTTPS for the local download server.',
+  setlocaldownloadserverbindhost: {
+    description: 'Set the download server bind/listen host.',
+    options: [
+      {
+        name: 'host',
+        description: 'Bind host (e.g., 127.0.0.1 or 0.0.0.0).',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.UseHttps = true;
+      const host = ctx.getStringOption('host');
+      state.settings.LocalDownloadServerBindHost = host;
       utils.stopDownloadServer();
       utils.ensureDownloadServer();
-      await ctx.reply('Enabled HTTPS for local download server.');
+      await ctx.reply(`Set local download server bind host to ${host}.`);
     },
   },
-  disablehttpsdownloadserver: {
-    description: 'Disable HTTPS for the local download server.',
+  setdownloadlinkttl: {
+    description: 'Set local download link expiry in seconds (0 = never).',
+    options: [
+      {
+        name: 'seconds',
+        description: 'Seconds until links expire.',
+        type: ApplicationCommandOptionTypes.INTEGER,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.UseHttps = false;
+      const seconds = ctx.getIntegerOption('seconds');
+      if (!Number.isNaN(seconds) && seconds >= 0) {
+        state.settings.LocalDownloadLinkTTLSeconds = seconds;
+        await ctx.reply(`Set local download link TTL to ${seconds} seconds.`);
+      } else {
+        await ctx.reply('Please provide a valid number of seconds (0 or higher).');
+      }
+    },
+  },
+  setdownloadmaxage: {
+    description: 'Set max age (days) for files in the download directory (0 = keep forever).',
+    options: [
+      {
+        name: 'days',
+        description: 'Maximum age in days.',
+        type: ApplicationCommandOptionTypes.NUMBER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const days = ctx.getNumberOption('days');
+      if (!Number.isNaN(days) && days >= 0) {
+        state.settings.DownloadDirMaxAgeDays = days;
+        await ctx.reply(`Set download directory max age to ${days} day(s).`);
+      } else {
+        await ctx.reply('Please provide a valid number of days (0 or higher).');
+      }
+    },
+  },
+  setdownloadminfree: {
+    description: 'Set minimum free disk space (GB) to keep by pruning downloads (0 = disabled).',
+    options: [
+      {
+        name: 'gb',
+        description: 'Minimum free space in gigabytes.',
+        type: ApplicationCommandOptionTypes.NUMBER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const gb = ctx.getNumberOption('gb');
+      if (!Number.isNaN(gb) && gb >= 0) {
+        state.settings.DownloadDirMinFreeGB = gb;
+        await ctx.reply(`Set download directory minimum free space to ${gb} GB.`);
+      } else {
+        await ctx.reply('Please provide a valid size in gigabytes (0 or higher).');
+      }
+    },
+  },
+  httpsdownloadserver: {
+    description: 'Toggle HTTPS for the local download server.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether HTTPS should be enabled for the local download server.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.UseHttps = enabled;
       utils.stopDownloadServer();
       utils.ensureDownloadServer();
-      await ctx.reply('Disabled HTTPS for local download server.');
+      await ctx.reply(`HTTPS for local download server is set to ${state.settings.UseHttps}.`);
     },
   },
   sethttpscert: {
@@ -1502,34 +1700,37 @@ const commandHandlers = {
       await ctx.reply(`Set HTTPS key path to ${key} and cert path to ${cert}.`);
     },
   },
-  enablepublishing: {
-    description: 'Publish messages sent to news channels automatically.',
+  publishing: {
+    description: 'Toggle publishing messages in news channels automatically.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether messages sent to news channels should be cross-posted automatically.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.Publish = true;
-      await ctx.reply('Enabled publishing messages sent to news channels.');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.Publish = enabled;
+      await ctx.reply(`Publishing messages in news channels is set to ${state.settings.Publish}.`);
     },
   },
-  disablepublishing: {
-    description: 'Stop publishing messages sent to news channels automatically.',
+  changenotifications: {
+    description: 'Toggle profile/status change notifications (and WhatsApp Status mirroring).',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether change notifications and WhatsApp Status mirroring are enabled.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
     async execute(ctx) {
-      state.settings.Publish = false;
-      await ctx.reply('Disabled publishing messages sent to news channels.');
-    },
-  },
-  enablechangenotifications: {
-    description: 'Enable profile/status change notifications (and WhatsApp Status mirroring).',
-    async execute(ctx) {
-      state.settings.ChangeNotifications = true;
-      state.settings.MirrorWAStatuses = true;
-      await ctx.reply('Enabled profile picture change notifications, status update notifications, and WhatsApp Status mirroring.');
-    },
-  },
-  disablechangenotifications: {
-    description: 'Disable profile/status change notifications (and WhatsApp Status mirroring).',
-    async execute(ctx) {
-      state.settings.ChangeNotifications = false;
-      state.settings.MirrorWAStatuses = false;
-      await ctx.reply('Disabled profile picture change notifications, status update notifications, and WhatsApp Status mirroring.');
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.ChangeNotifications = enabled;
+      state.settings.MirrorWAStatuses = enabled;
+      await ctx.reply(`Change notifications are set to ${state.settings.ChangeNotifications}.`);
     },
   },
   autosaveinterval: {
@@ -1626,6 +1827,17 @@ const commandHandlers = {
       await ctx.reply(`Redirecting webhooks is set to ${state.settings.redirectWebhooks}.`);
     },
   },
+  restart: {
+    description: 'Restart the bot safely.',
+    async execute(ctx) {
+      if (!ctx.isControlChannel) {
+        await ctx.reply('For safety, `/restart` can only be used in the control channel.');
+        return;
+      }
+
+      await requestSafeRestart(ctx, { message: 'Saved state. Restarting...' });
+    },
+  },
   updatechannel: {
     description: 'Switch update channel between stable and unstable.',
     options: [
@@ -1679,12 +1891,10 @@ const commandHandlers = {
         return;
       }
 
-      await ctx.reply('Update downloaded. Restarting...');
       state.updateInfo = null;
       await utils.discord.syncUpdatePrompt();
       await utils.discord.syncRollbackPrompt();
-      await fs.promises.writeFile('restart.flag', '');
-      process.exit();
+      await requestSafeRestart(ctx, { message: 'Update downloaded. Restarting...' });
     },
   },
   checkupdate: {
@@ -1730,10 +1940,8 @@ const commandHandlers = {
       await ctx.defer();
       const result = await utils.updater.rollback();
       if (result.success) {
-        await ctx.reply('Rolled back to the previous packaged binary. Restarting...');
         await utils.discord.syncRollbackPrompt();
-        await fs.promises.writeFile('restart.flag', '');
-        process.exit();
+        await requestSafeRestart(ctx, { message: 'Rolled back to the previous packaged binary. Restarting...' });
         return;
       }
 

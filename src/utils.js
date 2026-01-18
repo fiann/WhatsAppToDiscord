@@ -22,19 +22,42 @@ import storage from './storage.js';
 const { Webhook, MessageAttachment, MessageActionRow, MessageButton, Constants: DiscordConstants } = discordJs;
 const { StickerFormatTypes } = DiscordConstants;
 
-const downloadTokens = new Map();
+const DOWNLOAD_TOKEN_VERSION = 1;
 const CUSTOM_EMOJI_REGEX = /<(a?):([a-zA-Z0-9_]{1,32}):(\d+)>/g;
 const GIF_URL_EXTENSION_REGEX = /\.(gif|mp4|webm)$/i;
 const GIF_PROVIDER_HINTS = ['tenor', 'giphy', 'imgur', 'gyazo'];
 const isKnownGifProvider = (value = '') => GIF_PROVIDER_HINTS.some((hint) => value.includes(hint));
 const MIME_BY_EXTENSION = {
   gif: 'image/gif',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  jpe: 'image/jpeg',
   png: 'image/png',
   apng: 'image/png',
   webp: 'image/webp',
+  bmp: 'image/bmp',
+  tif: 'image/tiff',
+  tiff: 'image/tiff',
+  svg: 'image/svg+xml',
   mp4: 'video/mp4',
   webm: 'video/webm',
   mov: 'video/quicktime',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  oga: 'audio/ogg',
+  opus: 'audio/opus',
+  m4a: 'audio/mp4',
+  flac: 'audio/flac',
+  pdf: 'application/pdf',
+  txt: 'text/plain; charset=utf-8',
+  log: 'text/plain; charset=utf-8',
+  json: 'application/json; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+  zip: 'application/zip',
+  '7z': 'application/x-7z-compressed',
+  gz: 'application/gzip',
+  tar: 'application/x-tar',
 };
 const LINK_PREVIEW_FETCH_TIMEOUT_MS = 3000;
 const LINK_PREVIEW_MAX_REDIRECTS = 5;
@@ -57,6 +80,83 @@ const resolveLinkPreviewFromContentFn = () => {
   return candidates.find((candidate) => typeof candidate === 'function') || null;
 };
 const getPreviewFromContentFn = resolveLinkPreviewFromContentFn();
+
+const coercePositiveInt = (value) => {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return Math.floor(number);
+};
+
+const safeTimingEqual = (a, b) => {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const aBuf = Buffer.from(a, 'utf8');
+  const bBuf = Buffer.from(b, 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+};
+
+const getDownloadServerSecretKey = () => {
+  const secret = state.settings?.LocalDownloadServerSecret;
+  if (typeof secret !== 'string' || !secret) return null;
+  try {
+    return Buffer.from(secret, 'base64url');
+  } catch {
+    return null;
+  }
+};
+
+const ensureDownloadServerSecret = () => {
+  const existing = getDownloadServerSecretKey();
+  if (existing) return existing;
+  const secret = crypto.randomBytes(32).toString('base64url');
+  state.settings.LocalDownloadServerSecret = secret;
+  storage.saveSettings?.().catch(() => {});
+  return Buffer.from(secret, 'base64url');
+};
+
+const signDownloadTokenPayload = (payloadBase64) => {
+  const secretKey = getDownloadServerSecretKey();
+  if (!secretKey) return null;
+  return crypto.createHmac('sha256', secretKey).update(payloadBase64).digest('base64url');
+};
+
+const buildDownloadToken = (fileName) => {
+  const secretKey = ensureDownloadServerSecret();
+  const ttl = coercePositiveInt(state.settings?.LocalDownloadLinkTTLSeconds);
+  const now = Math.floor(Date.now() / 1000);
+  const payload = { v: DOWNLOAD_TOKEN_VERSION, f: fileName };
+  if (ttl) {
+    payload.e = now + ttl;
+  }
+  const payloadBase64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature = crypto.createHmac('sha256', secretKey).update(payloadBase64).digest('base64url');
+  return `${payloadBase64}.${signature}`;
+};
+
+const verifyDownloadToken = (token) => {
+  if (typeof token !== 'string' || !token) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payloadBase64, signature] = parts;
+  if (!payloadBase64 || !signature) return null;
+  const expected = signDownloadTokenPayload(payloadBase64);
+  if (!expected || !safeTimingEqual(expected, signature)) return null;
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadBase64, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (!payload || payload.v !== DOWNLOAD_TOKEN_VERSION) return null;
+  if (typeof payload.f !== 'string' || !payload.f) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.e != null) {
+    const exp = Number(payload.e);
+    if (!Number.isFinite(exp)) return null;
+    if (now > exp) return { ...payload, expired: true };
+  }
+  return payload;
+};
 
 const normalizeHostname = (hostname = '') => hostname.replace(/\.$/, '').toLowerCase();
 
@@ -623,24 +723,127 @@ function ensureWebhookReplySupport(webhook) {
 function ensureDownloadServer() {
   if (!state.settings.LocalDownloadServer || ensureDownloadServer.server) return;
 
-  const host = state.settings.LocalDownloadServerHost || '0.0.0.0';
+  const bindHost = state.settings.LocalDownloadServerBindHost || '0.0.0.0';
 
   const handler = (req, res) => {
-    const [, token] = req.url.split('/');
-    const filePath = downloadTokens.get(token);
-    if (!filePath || !fs.existsSync(filePath)) {
-      downloadTokens.delete(token);
-      res.writeHead(404);
-      res.end('Not found');
-      return;
-    }
-    res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
-    const stream = fs.createReadStream(filePath);
-    stream.on('error', () => {
+    void (async () => {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { Allow: 'GET, HEAD' });
+        res.end('Method not allowed');
+        return;
+      }
+
+      const requestUrl = new URL(req.url, 'http://localhost');
+      const segments = requestUrl.pathname.split('/').filter(Boolean);
+      const token = segments[0] || '';
+      const verification = verifyDownloadToken(token);
+      if (!verification || verification.expired) {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+      const resolvedDownloadDir = path.resolve(state.settings.DownloadDir);
+      const fileName = sanitizePathSegment(verification.f, 'file');
+      const filePath = path.resolve(resolvedDownloadDir, fileName);
+      const relative = path.relative(resolvedDownloadDir, filePath);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+      let stat;
+      try {
+        stat = await fs.promises.stat(filePath);
+      } catch {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+      if (!stat.isFile()) {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+
+      const ext = path.extname(fileName).replace(/^\./, '').toLowerCase();
+      const mime = extensionToMime(ext);
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.setHeader('Accept-Ranges', 'bytes');
+
+      const totalSize = stat.size;
+      const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
+      const rangeMatch = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+      const wantsRange = Boolean(rangeHeader);
+      if (wantsRange && !rangeMatch) {
+        res.writeHead(416, { 'Content-Range': `bytes */${totalSize}` });
+        res.end();
+        return;
+      }
+
+      let start = 0;
+      let end = totalSize - 1;
+      let status = 200;
+
+      if (rangeMatch) {
+        const startRaw = rangeMatch[1];
+        const endRaw = rangeMatch[2];
+        const startNum = startRaw ? Number.parseInt(startRaw, 10) : null;
+        const endNum = endRaw ? Number.parseInt(endRaw, 10) : null;
+
+        if (startNum == null && endNum == null) {
+          res.writeHead(416, { 'Content-Range': `bytes */${totalSize}` });
+          res.end();
+          return;
+        }
+
+        if (startNum == null) {
+          const suffixLength = endNum;
+          if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+            res.writeHead(416, { 'Content-Range': `bytes */${totalSize}` });
+            res.end();
+            return;
+          }
+          start = Math.max(totalSize - suffixLength, 0);
+          end = totalSize - 1;
+        } else {
+          start = startNum;
+          end = endNum == null ? totalSize - 1 : endNum;
+          if (end >= totalSize) {
+            end = totalSize - 1;
+          }
+        }
+
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= totalSize || end < start) {
+          res.writeHead(416, { 'Content-Range': `bytes */${totalSize}` });
+          res.end();
+          return;
+        }
+
+        status = 206;
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+      }
+
+      const contentLength = end - start + 1;
+      res.setHeader('Content-Length', String(contentLength));
+      res.writeHead(status);
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+
+      const stream = fs.createReadStream(filePath, status === 206 ? { start, end } : undefined);
+      stream.on('error', () => {
+        res.destroy();
+      });
+      stream.pipe(res);
+    })().catch(() => {
       res.writeHead(500);
       res.end('Error');
     });
-    stream.pipe(res);
   };
 
   const handleServerError = (err) => {
@@ -663,12 +866,14 @@ function ensureDownloadServer() {
         cert: fs.readFileSync(state.settings.HttpsCertPath),
       };
       ensureDownloadServer.server = https.createServer(options, handler);
+      ensureDownloadServer.protocol = 'https';
     } else {
       ensureDownloadServer.server = http.createServer(handler);
+      ensureDownloadServer.protocol = 'http';
     }
 
     ensureDownloadServer.server.on('error', handleServerError);
-    ensureDownloadServer.server.listen(state.settings.LocalDownloadServerPort, host);
+    ensureDownloadServer.server.listen(state.settings.LocalDownloadServerPort, bindHost);
   } catch (err) {
     handleServerError(err);
   }
@@ -678,7 +883,7 @@ function stopDownloadServer() {
   if (ensureDownloadServer.server) {
     ensureDownloadServer.server.close();
     ensureDownloadServer.server = null;
-    downloadTokens.clear();
+    ensureDownloadServer.protocol = null;
   }
 }
 
@@ -2034,9 +2239,18 @@ const discord = {
     }
   },
   async pruneDownloadsDir(ignorePath) {
-    const limitGB = state.settings.DownloadDirLimitGB;
-    if (!limitGB || limitGB <= 0) return;
-    const limitBytes = limitGB * 1024 * 1024 * 1024;
+    const limitGB = Number(state.settings.DownloadDirLimitGB) || 0;
+    const maxAgeDays = Number(state.settings.DownloadDirMaxAgeDays) || 0;
+    const minFreeGB = Number(state.settings.DownloadDirMinFreeGB) || 0;
+
+    const limitBytes = limitGB > 0 ? limitGB * 1024 * 1024 * 1024 : null;
+    const maxAgeMs = maxAgeDays > 0 ? maxAgeDays * 24 * 60 * 60 * 1000 : null;
+    const minFreeBytes = minFreeGB > 0 ? minFreeGB * 1024 * 1024 * 1024 : null;
+
+    if (!limitBytes && !maxAgeMs && !minFreeBytes) return;
+
+    const resolvedDownloadDir = path.resolve(state.settings.DownloadDir);
+    const resolvedIgnorePath = ignorePath ? path.resolve(ignorePath) : null;
     let entries;
     try {
       entries = await fs.promises.readdir(state.settings.DownloadDir);
@@ -2045,28 +2259,94 @@ const discord = {
     }
     const files = await Promise.all(
       entries.map(async (name) => {
-        const filePath = path.join(state.settings.DownloadDir, name);
+        const filePath = path.resolve(resolvedDownloadDir, name);
         try {
           const stat = await fs.promises.stat(filePath);
+          if (!stat.isFile()) return null;
           return { filePath, mtime: stat.mtimeMs, size: stat.size };
         } catch {
           return null;
         }
       }),
     );
-    const validFiles = files.filter(Boolean).sort((a, b) => a.mtime - b.mtime);
-    let total = validFiles.reduce((sum, f) => sum + f.size, 0);
-    for (const file of validFiles) {
-      if (total <= limitBytes) break;
-      if (file.filePath === ignorePath) continue;
+    let validFiles = files.filter(Boolean).sort((a, b) => a.mtime - b.mtime);
+
+    const deleteFile = async (file) => {
+      if (!file?.filePath) return false;
+      if (resolvedIgnorePath && file.filePath === resolvedIgnorePath) return false;
       try {
         await fs.promises.unlink(file.filePath);
-        downloadTokens.forEach((fp, t) => {
-          if (fp === file.filePath) downloadTokens.delete(t);
-        });
-        total -= file.size;
+        return true;
       } catch {
-        /* ignore */
+        return false;
+      }
+    };
+
+    if (maxAgeMs) {
+      const cutoff = Date.now() - maxAgeMs;
+      const remaining = [];
+      for (const file of validFiles) {
+        if (file.mtime >= cutoff) {
+          remaining.push(file);
+          continue;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        const deleted = await deleteFile(file);
+        if (!deleted) {
+          remaining.push(file);
+        }
+      }
+      validFiles = remaining;
+    }
+
+    if (limitBytes) {
+      let total = validFiles.reduce((sum, f) => sum + f.size, 0);
+      const remaining = [];
+      for (const file of validFiles) {
+        if (total <= limitBytes) {
+          remaining.push(file);
+          continue;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        const deleted = await deleteFile(file);
+        if (deleted) {
+          total -= file.size;
+        } else {
+          remaining.push(file);
+        }
+      }
+      validFiles = remaining;
+    }
+
+    if (minFreeBytes) {
+      let freeBytes = null;
+      try {
+        const statfs = await fs.promises.statfs(resolvedDownloadDir);
+        const bavail = Number(statfs?.bavail);
+        const bsize = Number(statfs?.bsize);
+        if (Number.isFinite(bavail) && Number.isFinite(bsize)) {
+          freeBytes = bavail * bsize;
+        }
+      } catch {
+        freeBytes = null;
+      }
+
+      if (freeBytes != null && freeBytes < minFreeBytes) {
+        const remaining = [];
+        for (const file of validFiles) {
+          if (freeBytes >= minFreeBytes) {
+            remaining.push(file);
+            continue;
+          }
+          // eslint-disable-next-line no-await-in-loop
+          const deleted = await deleteFile(file);
+          if (deleted) {
+            freeBytes += file.size;
+          } else {
+            remaining.push(file);
+          }
+        }
+        validFiles = remaining;
       }
     }
   },
@@ -2109,13 +2389,30 @@ const discord = {
       }
     }
     await this.pruneDownloadsDir(absPath);
-    ensureDownloadServer();
     let url;
     if (state.settings.LocalDownloadServer) {
-      const token = crypto.randomBytes(16).toString('hex');
-      downloadTokens.set(token, absPath);
-      const protocol = state.settings.UseHttps ? 'https' : 'http';
-      url = `${protocol}://${state.settings.LocalDownloadServerHost}:${state.settings.LocalDownloadServerPort}/${token}/${encodeURIComponent(fileName)}`;
+      ensureDownloadServer();
+      const server = ensureDownloadServer.server;
+      if (!server) {
+        url = pathToFileURL(absPath).href;
+      } else {
+        const token = buildDownloadToken(fileName);
+        const configuredHost = typeof state.settings.LocalDownloadServerHost === 'string'
+          ? state.settings.LocalDownloadServerHost.trim()
+          : '';
+        const publicHost = (configuredHost && !['0.0.0.0', '::'].includes(configuredHost))
+          ? configuredHost
+          : 'localhost';
+        const hostForUrl = publicHost.includes(':') && !publicHost.startsWith('[')
+          ? `[${publicHost}]`
+          : publicHost;
+        const address = server.listening ? server.address() : null;
+        const port = (state.settings.LocalDownloadServerPort === 0 && address && typeof address === 'object')
+          ? address.port
+          : state.settings.LocalDownloadServerPort;
+        const protocol = ensureDownloadServer.protocol || 'http';
+        url = `${protocol}://${hostForUrl}:${port}/${token}/${encodeURIComponent(fileName)}`;
+      }
     } else {
       url = pathToFileURL(absPath).href;
     }

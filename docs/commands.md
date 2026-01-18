@@ -59,21 +59,38 @@ Usage: `/removefromwhitelist channel:<#channel>`
 Override the prefix prepended to Discord → WhatsApp messages.  
 Usage: `/setdcprefix prefix:<optional text>` (omit to reset to usernames)
 
-### `/enabledcprefix` / `/disabledcprefix`
-Toggle whether the configured prefix is used.
+### `/dcprefix`
+Toggle whether the configured prefix is used.  
+Usage: `/dcprefix enabled:<true|false>`
 
-### `/enablewaprefix` / `/disablewaprefix`
-Toggle whether WhatsApp sender names are prepended inside Discord messages.
+### `/waprefix`
+Toggle whether WhatsApp sender names are prepended inside Discord messages.  
+Usage: `/waprefix enabled:<true|false>`
 
 ---
 
 ## Attachments & Downloads
 
-### `/enablewaupload` / `/disablewaupload`
-Toggle whether Discord attachments are uploaded to WhatsApp (vs sending as links).
+Defaults (out of the box):
 
-### `/enablelocaldownloads` / `/disablelocaldownloads`
-Control whether large WhatsApp attachments are downloaded locally when they exceed Discord’s upload limit.
+- Local downloads are disabled (`/localdownloads enabled:true` to turn on).
+- Download directory is `./downloads` and pruning is disabled (`/setdownloadlimit`, `/setdownloadmaxage`, `/setdownloadminfree` all default to `0` = off).
+- Local download server is disabled; when enabled it defaults to local-only (`127.0.0.1` bind, `localhost` URLs, port `8080`).
+- Download links are signed (survive restarts) and never expire by default (`/setdownloadlinkttl seconds:0`).
+
+To make download links reachable from other devices (phone/PC), you usually want:
+
+- `/setlocaldownloadserverbindhost host:0.0.0.0` (listen on all interfaces)
+- `/setlocaldownloadserverhost host:<LAN IP or domain>` (generate URLs recipients can reach)
+- Ensure firewall/port forwarding allows the configured port (default `8080`)
+
+### `/waupload`
+Toggle whether Discord attachments are uploaded to WhatsApp (vs sending as links).  
+Usage: `/waupload enabled:<true|false>`
+
+### `/localdownloads`
+Control whether large WhatsApp attachments are downloaded locally when they exceed Discord’s upload limit.  
+Usage: `/localdownloads enabled:<true|false>`
 
 ### `/getdownloadmessage`
 Show the current local-download notification template.
@@ -93,23 +110,41 @@ Usage: `/setdownloaddir path:<folder>`
 Limit the download directory size (GB).  
 Usage: `/setdownloadlimit size:<number>`
 
+### `/setdownloadmaxage`
+Delete downloaded files older than the given age (days).  
+Usage: `/setdownloadmaxage days:<number>` (0 disables age-based cleanup)
+
+### `/setdownloadminfree`
+Keep at least the given free disk space (GB) by pruning old downloads.  
+Usage: `/setdownloadminfree gb:<number>` (0 disables free-space pruning)
+
 ### `/setfilesizelimit`
 Override the Discord upload size limit used to decide when to download instead of re-uploading.  
 Usage: `/setfilesizelimit bytes:<integer>`
 
-### `/enablelocaldownloadserver` / `/disablelocaldownloadserver`
-Start/stop the built-in HTTP(S) server that serves downloaded files.
+### `/setdownloadlinkttl`
+Set local download link expiry in seconds.  
+Usage: `/setdownloadlinkttl seconds:<integer>` (0 = never expire)
+
+### `/localdownloadserver`
+Start/stop the built-in HTTP(S) server that serves downloaded files.  
+Usage: `/localdownloadserver enabled:<true|false>`
 
 ### `/setlocaldownloadserverhost`
 Configure the hostname used in generated download URLs.  
 Usage: `/setlocaldownloadserverhost host:<value>`
 
+### `/setlocaldownloadserverbindhost`
+Configure which interface the download server listens on.  
+Usage: `/setlocaldownloadserverbindhost host:<value>` (e.g., `127.0.0.1` or `0.0.0.0`)
+
 ### `/setlocaldownloadserverport`
 Configure which port the download server listens on.  
 Usage: `/setlocaldownloadserverport port:<1-65535>`
 
-### `/enablehttpsdownloadserver` / `/disablehttpsdownloadserver`
-Toggle HTTPS for the download server (requires certificates).
+### `/httpsdownloadserver`
+Toggle HTTPS for the download server (requires certificates).  
+Usage: `/httpsdownloadserver enabled:<true|false>`
 
 ### `/sethttpscert`
 Set TLS certificate paths for the download server.  
@@ -119,17 +154,20 @@ Usage: `/sethttpscert key_path:<file> cert_path:<file>`
 
 ## Messaging Behavior
 
-### `/enabledeletes` / `/disabledeletes`
-Toggle mirrored message deletions between Discord and WhatsApp.
+### `/deletes`
+Toggle mirrored message deletions between Discord and WhatsApp.  
+Usage: `/deletes enabled:<true|false>`
 
-### `/enablereadreceipts` / `/disablereadreceipts`
-Turn read receipts on or off entirely.
+### `/readreceipts`
+Turn read receipts on or off entirely.  
+Usage: `/readreceipts enabled:<true|false>`
 
 ### `/dmreadreceipts`, `/publicreadreceipts`, `/reactionreadreceipts`
 Pick the delivery style when read receipts are enabled (DM, short channel reply, or ☑️ reaction).
 
-### `/enablechangenotifications` / `/disablechangenotifications`
-Toggle profile-picture / status-change alerts and WhatsApp Status (stories) mirroring (posted into the `status@broadcast` / `#status` channel).
+### `/changenotifications`
+Toggle profile-picture / status-change alerts and WhatsApp Status (stories) mirroring (posted into the `status@broadcast` / `#status` channel).  
+Usage: `/changenotifications enabled:<true|false>`
 
 ### `/oneway`
 Restrict the bridge to one direction or keep it bidirectional.  
@@ -143,12 +181,20 @@ Usage: `/redirectbots enabled:<true|false>`
 Allow or block Discord webhook messages from being forwarded to WhatsApp.  
 Usage: `/redirectwebhooks enabled:<true|false>`
 
+### `/publishing`
+Toggle automatic cross-posting for messages sent to Discord news channels.  
+Usage: `/publishing enabled:<true|false>`
+
 ### `/ping`
 Return the current bot latency.
 
 ---
 
 ## Maintenance & Settings
+
+### `/restart`
+Safely save state and restart the bot (requires running via the watchdog runner).  
+Usage: `/restart` (control channel only)
 
 ### `/resync`
 Re-sync WhatsApp contacts/groups. Set `rename:true` to rename Discord channels to match WhatsApp subjects.
@@ -161,7 +207,7 @@ Usage: `/autosaveinterval seconds:<integer>`
 Limit how many WhatsApp messages remain editable/deletable from Discord.  
 Usage: `/lastmessagestorage size:<integer>`
 
-### `/enablelocaldownloadserver`, `/disablelocaldownloadserver`, `/enablehttpsdownloadserver`, `/disablehttpsdownloadserver`
+### `/localdownloadserver`, `/setlocaldownloadserverhost`, `/setlocaldownloadserverbindhost`, `/setlocaldownloadserverport`, `/setdownloadlinkttl`, `/httpsdownloadserver`, `/sethttpscert`
 See “Attachments & Downloads” above (listed again here for visibility).
 
 ---

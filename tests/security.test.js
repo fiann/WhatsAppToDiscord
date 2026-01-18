@@ -110,7 +110,10 @@ test('Local download server only serves known tokens', async (t) => {
     'DownloadDir',
     'LocalDownloadServer',
     'LocalDownloadServerHost',
+    'LocalDownloadServerBindHost',
     'LocalDownloadServerPort',
+    'LocalDownloadServerSecret',
+    'LocalDownloadLinkTTLSeconds',
     'LocalDownloadMessage',
     'UseHttps',
     'HttpsKeyPath',
@@ -125,7 +128,10 @@ test('Local download server only serves known tokens', async (t) => {
     state.settings.DownloadDir = tempDir;
     state.settings.LocalDownloadServer = true;
     state.settings.LocalDownloadServerHost = '127.0.0.1';
+    state.settings.LocalDownloadServerBindHost = '127.0.0.1';
     state.settings.LocalDownloadServerPort = 0;
+    state.settings.LocalDownloadServerSecret = Buffer.from('wa2dc-test-secret', 'utf8').toString('base64url');
+    state.settings.LocalDownloadLinkTTLSeconds = 0;
     state.settings.LocalDownloadMessage = '{url}';
     state.settings.UseHttps = false;
     state.settings.HttpsKeyPath = '';
@@ -175,6 +181,92 @@ test('Local download server only serves known tokens', async (t) => {
     const goodResponse = await originalFetch(`http://127.0.0.1:${port}/${token}/${encodeURIComponent(fileName)}`);
     assert.equal(goodResponse.status, 200);
     assert.equal(await goodResponse.text(), 'hello');
+  } finally {
+    utils.stopDownloadServer();
+    restoreSettings(settingsSnapshot);
+    await fs.rm(tempDir, { recursive: true, force: true });
+    global.fetch = originalFetch;
+  }
+});
+
+test('Local download server supports HTTP range requests', async (t) => {
+  const originalFetch = global.fetch;
+  const settingsSnapshot = snapshotSettings([
+    'DownloadDir',
+    'LocalDownloadServer',
+    'LocalDownloadServerHost',
+    'LocalDownloadServerBindHost',
+    'LocalDownloadServerPort',
+    'LocalDownloadServerSecret',
+    'LocalDownloadLinkTTLSeconds',
+    'LocalDownloadMessage',
+    'UseHttps',
+    'HttpsKeyPath',
+    'HttpsCertPath',
+  ]);
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa2dc-download-range-'));
+
+  try {
+    utils.stopDownloadServer();
+
+    state.settings.DownloadDir = tempDir;
+    state.settings.LocalDownloadServer = true;
+    state.settings.LocalDownloadServerHost = '127.0.0.1';
+    state.settings.LocalDownloadServerBindHost = '127.0.0.1';
+    state.settings.LocalDownloadServerPort = 0;
+    state.settings.LocalDownloadServerSecret = Buffer.from('wa2dc-test-secret', 'utf8').toString('base64url');
+    state.settings.LocalDownloadLinkTTLSeconds = 0;
+    state.settings.LocalDownloadMessage = '{url}';
+    state.settings.UseHttps = false;
+    state.settings.HttpsKeyPath = '';
+    state.settings.HttpsCertPath = '';
+
+    const urlText = await utils.discord.downloadLargeFile({
+      name: 'hello.txt',
+      attachment: Buffer.from('hello'),
+    });
+
+    const server = utils.ensureDownloadServer.server;
+    if (!server) {
+      t.skip('Download server could not be started in this environment.');
+      return;
+    }
+
+    if (!server.listening) {
+      const timeoutMs = 5_000;
+      const timeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`Timed out waiting for download server to listen (${timeoutMs}ms)`)), timeoutMs);
+      });
+
+      try {
+        await Promise.race([
+          once(server, 'listening'),
+          once(server, 'error').then(([err]) => { throw err; }),
+          timeout,
+        ]);
+      } catch (err) {
+        if (err?.code === 'EPERM' || err?.code === 'EACCES') {
+          t.skip(`Download server listen not permitted in this environment (${err.code}).`);
+          return;
+        }
+        throw err;
+      }
+    }
+    const port = server.address().port;
+
+    const parsed = new URL(urlText);
+    const [, token, fileNameEncoded] = parsed.pathname.split('/');
+    const fileName = decodeURIComponent(fileNameEncoded || 'hello.txt');
+
+    const partialResponse = await originalFetch(`http://127.0.0.1:${port}/${token}/${encodeURIComponent(fileName)}`, {
+      headers: {
+        Range: 'bytes=0-1',
+      },
+    });
+    assert.equal(partialResponse.status, 206);
+    assert.match(partialResponse.headers.get('content-range') || '', /bytes 0-1\/\d+/);
+    assert.equal(await partialResponse.text(), 'he');
   } finally {
     utils.stopDownloadServer();
     restoreSettings(settingsSnapshot);
