@@ -411,8 +411,18 @@ const migrateLegacyChats = async (client) => {
 };
 
 const connectToWhatsApp = async (retry = 1) => {
-    const controlChannel = await utils.discord.getControlChannel();
+    const controlChannel = await utils.discord.getControlChannel().catch(() => null);
     const { version } = await getBaileysVersion();
+    const sendControlMessage = async (message) => {
+        if (!controlChannel || state.shutdownRequested) {
+            return;
+        }
+        try {
+            await controlChannel.send(message);
+        } catch (err) {
+            state.logger?.debug?.({ err }, 'Failed to send WhatsApp status to control channel');
+        }
+    };
 
     if (!groupCachePruneInterval) {
         groupCachePruneInterval = setInterval(() => groupMetadataCache.prune(), 60 * 60 * 1000);
@@ -447,49 +457,59 @@ const connectToWhatsApp = async (retry = 1) => {
     });
 
     client.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) {
-            utils.whatsapp.sendQR(qr);
-        }
-        if (connection === 'close') {
-            state.logger.error(lastDisconnect?.error);
-            groupRefreshScheduler.clearAll();
-            groupMetadataCache.clear();
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession) {
-                await controlChannel.send('WhatsApp session invalid. Please rescan the QR code.');
-                await utils.whatsapp.deleteSession();
-                await actions.start(true);
+        try {
+            if (state.shutdownRequested) {
                 return;
             }
-            const delayMs = getReconnectDelayMs(retry);
-            const humanReason = formatDisconnectReason(statusCode);
-            if (delayMs === 0) {
-                await controlChannel?.send(`WhatsApp connection failed (${humanReason}). Trying to reconnect! Retry #${retry}`);
-            } else {
-                const delaySeconds = Math.round(delayMs / 1000);
-                await controlChannel?.send(`WhatsApp connection failed (${humanReason}). Waiting ${delaySeconds} seconds before trying to reconnect! Retry #${retry}.`);
-                await sleep(delayMs);
-            }
-            await connectToWhatsApp(retry + 1);
-            return;
-        } else if (connection === 'open') {
-            state.waClient = client;
-            // eslint-disable-next-line no-param-reassign
-            retry = 1;
-            await controlChannel.send('WhatsApp connection successfully opened!');
 
-            try {
-                const groups = await client.groupFetchAllParticipating();
-                groupMetadataCache.prime(groups);
-                for (const [jid, data] of Object.entries(groups)) {
-                    state.contacts[jid] = data.subject;
-                    client.contacts[jid] = data.subject;
-                }
-                await migrateLegacyChats(client);
-            } catch (err) {
-                state.logger?.error(err);
+            const { connection, lastDisconnect, qr } = update;
+            if (qr) {
+                utils.whatsapp.sendQR(qr);
             }
+            if (connection === 'close') {
+                state.logger.error(lastDisconnect?.error);
+                groupRefreshScheduler.clearAll();
+                groupMetadataCache.clear();
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession) {
+                    await sendControlMessage('WhatsApp session invalid. Please rescan the QR code.');
+                    await utils.whatsapp.deleteSession();
+                    await actions.start(true);
+                    return;
+                }
+                const delayMs = getReconnectDelayMs(retry);
+                const humanReason = formatDisconnectReason(statusCode);
+                if (delayMs === 0) {
+                    await sendControlMessage(`WhatsApp connection failed (${humanReason}). Trying to reconnect! Retry #${retry}`);
+                } else {
+                    const delaySeconds = Math.round(delayMs / 1000);
+                    await sendControlMessage(`WhatsApp connection failed (${humanReason}). Waiting ${delaySeconds} seconds before trying to reconnect! Retry #${retry}.`);
+                    await sleep(delayMs);
+                }
+                if (!state.shutdownRequested) {
+                    await connectToWhatsApp(retry + 1);
+                }
+                return;
+            } else if (connection === 'open') {
+                state.waClient = client;
+                // eslint-disable-next-line no-param-reassign
+                retry = 1;
+                await sendControlMessage('WhatsApp connection successfully opened!');
+
+                try {
+                    const groups = await client.groupFetchAllParticipating();
+                    groupMetadataCache.prime(groups);
+                    for (const [jid, data] of Object.entries(groups)) {
+                        state.contacts[jid] = data.subject;
+                        client.contacts[jid] = data.subject;
+                    }
+                    await migrateLegacyChats(client);
+                } catch (err) {
+                    state.logger?.error(err);
+                }
+            }
+        } catch (err) {
+            state.logger?.warn({ err }, 'Failed to handle WhatsApp connection.update');
         }
     });
     const credsListener = typeof saveState === 'function' ? saveState : () => {};

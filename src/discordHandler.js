@@ -43,11 +43,13 @@ const requestSafeRestart = async (ctx, { message = 'Restarting...', exitCode = 0
     return;
   }
   restartInProgress = true;
+  state.shutdownRequested = true;
 
   try {
     await storage.save();
   } catch (err) {
     restartInProgress = false;
+    state.shutdownRequested = false;
     state.logger?.error({ err }, 'Failed to save state before restart');
     await ctx.reply('Failed to save state; restart aborted. Check logs.');
     return;
@@ -77,7 +79,7 @@ const requestSafeRestart = async (ctx, { message = 'Restarting...', exitCode = 0
     /* ignore */
   }
   try {
-    state.waClient?.end?.(new Error('Restart requested'));
+    void Promise.resolve(state.waClient?.end?.(new Error('Restart requested'))).catch(() => {});
   } catch {
     /* ignore */
   }

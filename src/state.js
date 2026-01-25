@@ -73,6 +73,7 @@ const state = {
   goccRuns: {},
   updateInfo: null,
   version: '',
+  shutdownRequested: false,
 };
 
 export const settings = state.settings;
