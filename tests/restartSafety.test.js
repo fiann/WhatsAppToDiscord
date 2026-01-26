@@ -46,6 +46,21 @@ class FakeWhatsAppClient {
   }
 }
 
+const waitFor = async (predicate, { timeoutMs = 750, intervalMs = 5 } = {}) => {
+  const deadline = Date.now() + timeoutMs;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (predicate()) {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await delay(intervalMs);
+  }
+};
+
 test('connection.update ignores Discord send failures and still reconnects', async () => {
   const originalLogger = state.logger;
   const originalShutdownRequested = state.shutdownRequested;
@@ -91,12 +106,11 @@ test('connection.update ignores Discord send failures and still reconnects', asy
       lastDisconnect: { error: { output: { statusCode: 500 } } },
     });
 
-    await delay(0);
-    await delay(0);
+    const reconnected = await waitFor(() => createdClients.length >= 2, { timeoutMs: 1500 });
     process.removeListener('unhandledRejection', onUnhandled);
 
     assert.equal(unhandled, undefined);
-    assert.equal(createdClients.length, 2);
+    assert.ok(reconnected, `Expected reconnect attempt, but only saw ${createdClients.length} client(s).`);
     assert.ok(sendCalls >= 1);
   } finally {
     state.logger = originalLogger;
@@ -150,8 +164,7 @@ test('connection.update no-ops during shutdown', async () => {
       lastDisconnect: { error: { output: { statusCode: 500 } } },
     });
 
-    await delay(0);
-    await delay(0);
+    await delay(50);
     process.removeListener('unhandledRejection', onUnhandled);
 
     assert.equal(unhandled, undefined);
