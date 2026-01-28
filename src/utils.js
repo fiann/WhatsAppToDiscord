@@ -1566,10 +1566,14 @@ const discord = {
     return buildLinkPreviewInfo(text, { uploadImage, logger });
   },
   async getGuild() {
+    if (!state.dcClient) return null;
+    if (!state.settings?.GuildID) return null;
     return state.dcClient.guilds.fetch(state.settings.GuildID).catch((err) => { state.logger?.error(err) });
   },
   async getChannel(channelID) {
-    return (await this.getGuild()).channels.fetch(channelID).catch((err) => { state.logger?.error(err) });
+    const guild = await this.getGuild();
+    if (!guild) return null;
+    return guild.channels.fetch(channelID).catch((err) => { state.logger?.error(err) });
   },
   async getCategory(nthChannel) {
     const guild = await this.getGuild();
@@ -1610,7 +1614,9 @@ const discord = {
     }
   },
   async createChannel(name) {
-    return (await this.getGuild()).channels.create(name, {
+    const guild = await this.getGuild();
+    if (!guild) return null;
+    return guild.channels.create(name, {
       type: 'GUILD_TEXT',
       parent: await this.getCategory(Object.keys(state.chats).length + this._unfinishedGoccCalls),
     });
@@ -2027,6 +2033,7 @@ const discord = {
     let channel = await this.getChannel(state.settings.ControlChannelID);
     if (!channel) {
       channel = await this.createChannel('control-room');
+      if (!channel) return null;
       state.settings.ControlChannelID = channel.id;
       await channel.edit({
         position: 0,

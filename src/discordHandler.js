@@ -1980,7 +1980,7 @@ const slashCommands = Object.entries(commandHandlers)
 
 const buildInviteLink = () => (
   client?.user?.id
-    ? `https://discordapp.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20application.commands&permissions=${BOT_PERMISSIONS}`
+    ? `https://discord.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20applications.commands&permissions=${BOT_PERMISSIONS}`
     : null
 );
 
@@ -1999,8 +1999,8 @@ const registerSlashCommands = async () => {
       slashRegisterWarned = true;
       const link = buildInviteLink();
       const warning = link
-        ? `Slash commands could not be registered (missing application.commands scope). Re-invite the bot with this link:\n${link}`
-        : 'Slash commands could not be registered (missing application.commands scope). Re-invite the bot with both bot and application.commands scopes.';
+        ? `Slash commands could not be registered (missing applications.commands scope). Re-invite the bot with this link:\n${link}`
+        : 'Slash commands could not be registered (missing applications.commands scope). Re-invite the bot with both bot and applications.commands scopes.';
       controlChannel?.send(warning).catch(() => {});
     }
   }
