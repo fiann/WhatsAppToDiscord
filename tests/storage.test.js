@@ -146,3 +146,52 @@ test('parseSettings recovers via firstRun on corrupted JSON (mocked Discord boot
   }
 });
 
+test('parseLastMessages tolerates null JSON payloads', async () => {
+  const originalDir = storage._storageDir;
+  const settingsSnapshot = snapshotObject(state.settings);
+  const originalLastMessages = state.lastMessages;
+  const tempBase = await fs.mkdtemp(path.join(os.tmpdir(), 'wa2dc-lastmessages-null-'));
+  const sandboxDir = path.join(tempBase, 'storage');
+
+  storage._storageDir = sandboxDir;
+  try {
+    await fs.mkdir(sandboxDir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(sandboxDir, 'lastMessages'), 'null', { mode: 0o600 });
+
+    const map = await storage.parseLastMessages();
+    assert.equal(typeof map, 'object');
+    assert.deepEqual(Object.keys(map), []);
+
+    map['wa-1'] = 'dc-1';
+    assert.equal(map['wa-1'], 'dc-1');
+    assert.equal(map['dc-1'], 'wa-1');
+  } finally {
+    storage._storageDir = originalDir;
+    restoreObject(state.settings, settingsSnapshot);
+    state.lastMessages = originalLastMessages;
+    await fs.rm(tempBase, { recursive: true, force: true });
+  }
+});
+
+test('storage.save never persists lastMessages as null', async () => {
+  const originalDir = storage._storageDir;
+  const settingsSnapshot = snapshotObject(state.settings);
+  const originalLastMessages = state.lastMessages;
+  const tempBase = await fs.mkdtemp(path.join(os.tmpdir(), 'wa2dc-lastmessages-save-'));
+  const sandboxDir = path.join(tempBase, 'storage');
+
+  storage._storageDir = sandboxDir;
+  try {
+    state.lastMessages = null;
+    await storage.save();
+
+    const saved = await fs.readFile(path.join(sandboxDir, 'lastMessages'), 'utf8');
+    assert.notEqual(saved.trim(), 'null');
+    assert.equal(saved.trim(), '{}');
+  } finally {
+    storage._storageDir = originalDir;
+    restoreObject(state.settings, settingsSnapshot);
+    state.lastMessages = originalLastMessages;
+    await fs.rm(tempBase, { recursive: true, force: true });
+  }
+});

@@ -25,10 +25,11 @@ const sanitizeStorageKey = (name = '') => {
   return base;
 };
 
-const bidirectionalMap = (capacity, data = {}) => {
-  const keys = Object.keys(data);
+const bidirectionalMap = (capacity, data) => {
+  const backing = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+  const keys = Object.keys(backing);
   return new Proxy(
-    data,
+    backing,
     {
       set(target, prop, newVal) {
         keys.push(prop, newVal);
@@ -135,9 +136,18 @@ const storage = {
   _lastMessagesName: 'lastMessages',
   async parseLastMessages() {
     const result = await this.get(this._lastMessagesName);
-    return result ?
-      bidirectionalMap(state.settings.lastMessageStorage * 2, JSON.parse(result)) :
-      bidirectionalMap(state.settings.lastMessageStorage * 2);
+    const capacity = state.settings.lastMessageStorage * 2;
+    if (!result) {
+      return bidirectionalMap(capacity);
+    }
+
+    try {
+      const parsed = JSON.parse(result);
+      return bidirectionalMap(capacity, parsed);
+    } catch (err) {
+      state.logger?.warn?.({ err }, 'Failed to parse lastMessages; resetting to empty.');
+      return bidirectionalMap(capacity);
+    }
   },
 
   _startTimeName: 'lastTimestamp',
@@ -150,7 +160,7 @@ const storage = {
     await this.upsert(this._settingsName, JSON.stringify(state.settings));
     await this.upsert(this._chatsName, JSON.stringify(state.chats));
     await this.upsert(this._contactsName, JSON.stringify(state.contacts));
-    await this.upsert(this._lastMessagesName, JSON.stringify(state.lastMessages));
+    await this.upsert(this._lastMessagesName, JSON.stringify(state.lastMessages ?? {}));
     await this.upsert(this._startTimeName, state.startTime.toString());
   },
 };
@@ -161,7 +171,7 @@ const setup = {
       const client = createDiscordClient({ intents: [Intents.FLAGS.GUILDS] });
       client.once('ready', () => {
         state.logger?.info(
-          `Invite the bot using the following link: https://discordapp.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20application.commands&permissions=536879120`,
+          `Invite the bot using the following link: https://discord.com/oauth2/authorize?client_id=${client.user.id}&scope=bot%20applications.commands&permissions=536879120`,
         );
       });
       client.once('guildCreate', async (guild) => {
