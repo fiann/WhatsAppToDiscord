@@ -67,6 +67,10 @@ Usage: `/dcprefix enabled:<true|false>`
 Toggle whether WhatsApp sender names are prepended inside Discord messages.  
 Usage: `/waprefix enabled:<true|false>`
 
+### `/waplatformsuffix`
+Toggle whether WhatsApp messages mirrored to Discord include a suffix showing the sender platform (Android/iOS/Desktop/Web).  
+Usage: `/waplatformsuffix enabled:<true|false>`
+
 ---
 
 ## Attachments & Downloads

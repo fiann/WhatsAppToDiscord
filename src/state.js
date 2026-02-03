@@ -4,6 +4,7 @@ const state = {
     DiscordPrefixText: null,
     DiscordPrefix: false,
     WAGroupPrefix: false,
+    WASenderPlatformSuffix: false,
     UploadAttachments: true,
     Token: '',
     GuildID: '',

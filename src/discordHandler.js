@@ -1,5 +1,6 @@
 import discordJs from 'discord.js';
 import fs from 'fs';
+import { getDevice } from '@whiskeysockets/baileys';
 
 import state from './state.js';
 import utils from './utils.js';
@@ -312,15 +313,40 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
     msgContent = `WA2DC: Received ${count} attachment${count === 1 ? '' : 's'} larger than Discord's upload limit. Download link${count === 1 ? '' : 's'} will be posted shortly.`;
   }
 
-  if (msgContent) {
-    const normalization = utils.discord.ensureExplicitUrlScheme(msgContent);
-    msgContent = normalization.text;
-  }
-
   if (message.isPoll && Array.isArray(message.pollOptions) && message.pollOptions.length) {
     const note = '\n\nPoll voting is only available on WhatsApp. Please vote from your phone.';
     msgContent = (msgContent || message.content || 'Poll') + note;
     components = [];
+  }
+
+  if (state.settings.WASenderPlatformSuffix) {
+    const idForDevice = typeof messageIds?.[0] === 'string' ? messageIds[0] : message?.id;
+    let platformLabel = null;
+    if (typeof idForDevice === 'string' && idForDevice.trim()) {
+      try {
+        const device = getDevice(idForDevice);
+        if (device === 'ios') platformLabel = 'iOS';
+        else if (device === 'web') platformLabel = 'Web';
+        else if (device === 'android') platformLabel = 'Android';
+        else if (device === 'desktop') platformLabel = 'Desktop';
+      } catch {
+        platformLabel = null;
+      }
+    }
+
+    if (platformLabel) {
+      const tag = `*(${platformLabel})*`;
+      if (msgContent) {
+        msgContent = `${msgContent}\n\n${tag}`;
+      } else if (files.length || largeFiles.length) {
+        msgContent = tag;
+      }
+    }
+  }
+
+  if (msgContent) {
+    const normalization = utils.discord.ensureExplicitUrlScheme(msgContent);
+    msgContent = normalization.text;
   }
 
   if (message.isEdit) {
@@ -1309,6 +1335,22 @@ const commandHandlers = {
       const enabled = Boolean(ctx.getBooleanOption('enabled'));
       state.settings.WAGroupPrefix = enabled;
       await ctx.reply(`WhatsApp name prefix is set to ${state.settings.WAGroupPrefix}.`);
+    },
+  },
+  waplatformsuffix: {
+    description: 'Toggle WhatsApp sender platform suffix on Discord.',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether WhatsApp messages mirrored to Discord should include a sender platform suffix.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.WASenderPlatformSuffix = enabled;
+      await ctx.reply(`WhatsApp sender platform suffix is set to ${state.settings.WASenderPlatformSuffix}.`);
     },
   },
   waupload: {
