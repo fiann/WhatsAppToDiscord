@@ -63,6 +63,7 @@ const LINK_PREVIEW_FETCH_TIMEOUT_MS = 3000;
 const LINK_PREVIEW_MAX_REDIRECTS = 5;
 const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
 const LINK_PREVIEW_MAX_BYTES = 1024 * 1024; // 1 MiB
+const LINK_PREVIEW_THUMB_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB
 const EXPLICIT_URL_REGEX = /<?https?:\/\/[^\s>]+>?/i;
 const BARE_URL_REGEX = /(?:^|[\s<])((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=+#]*)?)/i;
 const TRAILING_PUNCTUATION_REGEX = /[)\],.;!?]+$/;
@@ -435,6 +436,72 @@ const fetchPreviewResponse = async (url, { maxBytes = LINK_PREVIEW_MAX_BYTES } =
   }
 };
 
+const fetchPreviewBuffer = async (url, {
+  maxBytes = LINK_PREVIEW_THUMB_MAX_BYTES,
+  accept = 'image/*,*/*;q=0.8',
+} = {}) => {
+  let currentUrl = url;
+  let redirects = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    validatePreviewTargetUrl(currentUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LINK_PREVIEW_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(currentUrl, {
+        dispatcher: linkPreviewDispatcher,
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: {
+          'user-agent': 'WA2DC-LinkPreview',
+          accept,
+        },
+      });
+
+      const status = Number(response.status) || 0;
+      if (status >= 300 && status < 400) {
+        const locationHeader = response.headers.get('location') || '';
+        if (!locationHeader) {
+          throw new Error('Redirect without location');
+        }
+        if (redirects >= LINK_PREVIEW_MAX_REDIRECTS) {
+          throw new Error('Too many redirects');
+        }
+        currentUrl = new URL(locationHeader, currentUrl).toString();
+        redirects += 1;
+        continue;
+      }
+
+      if (status < 200 || status >= 300) {
+        throw new Error(`Unexpected status ${status}`);
+      }
+
+      const headers = {};
+      response.headers.forEach((value, key) => {
+        headers[String(key).toLowerCase()] = value;
+      });
+
+      const contentLength = Number(headers['content-length']);
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        const err = new Error('Response too large');
+        err.code = 'WA2DC_PREVIEW_TOO_LARGE';
+        throw err;
+      }
+
+      const buffer = await readBodyWithLimit(response.body, maxBytes);
+      return { url: currentUrl, headers, buffer };
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+        throw new Error('Request timeout');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
+
 const sanitizeFileName = (name = '', fallback = 'file') => {
   const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
   return normalized || fallback;
@@ -589,7 +656,23 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
     return {};
   }
   try {
-    const { imageMessage } = await prepareWAMessageMedia({ image: { url: imageUrl } }, {
+    const { buffer } = await fetchPreviewBuffer(imageUrl, { maxBytes: LINK_PREVIEW_THUMB_MAX_BYTES, accept: 'image/*,*/*;q=0.8' });
+
+    let jpegThumbnail;
+    try {
+      const jimp = await import('jimp');
+      if (typeof jimp?.Jimp?.read === 'function') {
+        const img = await jimp.Jimp.read(buffer);
+        const width = 192;
+        jpegThumbnail = await img
+          .resize({ w: width, mode: jimp.ResizeStrategy.BILINEAR })
+          .getBuffer('image/jpeg', { quality: 50 });
+      }
+    } catch (err) {
+      state.logger?.debug?.({ err }, 'Failed to generate link preview jpegThumbnail');
+    }
+
+    const { imageMessage } = await prepareWAMessageMedia({ image: buffer }, {
       upload: uploadImage,
       mediaTypeOverride: 'thumbnail-link',
       options: fetchOpts,
@@ -597,7 +680,9 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
     if (!imageMessage) {
       return {};
     }
-    const jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
+    if (!jpegThumbnail && imageMessage.jpegThumbnail) {
+      jpegThumbnail = Buffer.from(imageMessage.jpegThumbnail);
+    }
     return {
       jpegThumbnail,
       highQualityThumbnail: imageMessage,
@@ -660,7 +745,7 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
   });
   if (firstImage) {
     urlInfo.originalThumbnailUrl = firstImage;
-    if (!process.pkg && typeof uploadImage === 'function') {
+    if (typeof uploadImage === 'function') {
       const { jpegThumbnail, highQualityThumbnail } = await buildHighQualityThumbnail(firstImage, uploadImage, LINK_PREVIEW_FETCH_OPTS);
       if (jpegThumbnail) {
         urlInfo.jpegThumbnail = jpegThumbnail;
