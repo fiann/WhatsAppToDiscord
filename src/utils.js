@@ -2814,26 +2814,13 @@ const whatsapp = {
     }
     return [...results];
   },
-  async preferMentionJidForChat(mentionJid, chatJid) {
+  async preferMentionJidForChat(mentionJid) {
     const formatted = this.formatJid(mentionJid);
     if (!formatted) return null;
 
-    const wantsLid = typeof chatJid === 'string' && chatJid.endsWith('@g.us');
     const store = state.waClient?.signalRepository?.lidMapping;
 
-    if (wantsLid) {
-      if (this.isLidJid(formatted)) return formatted;
-      if (this.isPhoneJid(formatted) && store && typeof store.getLIDForPN === 'function') {
-        try {
-          const lid = this.formatJid(await store.getLIDForPN(formatted));
-          if (lid) return lid;
-        } catch (err) {
-          state.logger?.debug?.({ err }, 'Failed to resolve LID JID for mention');
-        }
-      }
-      return formatted;
-    }
-
+    // Outgoing mentions: prefer PN JIDs where possible (most compatible).
     if (this.isPhoneJid(formatted)) return formatted;
     if (this.isLidJid(formatted) && store && typeof store.getPNForLID === 'function') {
       try {
@@ -2870,10 +2857,7 @@ const whatsapp = {
       const linked = this.getLinkedJidsForDiscordUserId(discordUserId);
       if (!linked.length) continue;
 
-      const wantsLid = typeof chatJid === 'string' && chatJid.endsWith('@g.us');
-      const preferred = wantsLid
-        ? (linked.find((jid) => this.isLidJid(jid)) || linked[0])
-        : (linked.find((jid) => this.isPhoneJid(jid)) || linked[0]);
+      const preferred = linked.find((jid) => this.isPhoneJid(jid)) || linked[0];
 
       let mentionJid = await this.preferMentionJidForChat(preferred, chatJid);
       if (!mentionJid) continue;

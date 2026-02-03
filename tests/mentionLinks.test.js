@@ -272,7 +272,7 @@ test('Outgoing mention parsing supports phone-number tokens', async () => {
   }
 });
 
-test('Discord mentions prefer LID JIDs in WhatsApp groups when available', async () => {
+test('Discord mentions prefer PN JIDs when both PN and LID links exist', async () => {
   const originalWaClient = state.waClient;
   const originalContacts = snapshotObject(state.contacts);
   const originalLinks = snapshotObject(state.settings.WhatsAppDiscordMentionLinks);
@@ -301,8 +301,8 @@ test('Discord mentions prefer LID JIDs in WhatsApp groups when available', async
       },
     ], { chatJid: '123456789@g.us' });
 
-    assert.equal(result.text, 'Hi @Alice');
-    assert.deepEqual(result.mentionJids, [lidJid]);
+    assert.equal(result.text, 'Hi @14155550123');
+    assert.deepEqual(result.mentionJids, [pnJid]);
   } finally {
     state.waClient = originalWaClient;
     restoreObject(state.contacts, originalContacts);

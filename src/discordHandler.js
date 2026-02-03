@@ -817,6 +817,24 @@ const commandHandlers = {
       await ctx.reply(`Pong ${Date.now() - ctx.createdTimestamp}ms!`);
     },
   },
+  chatinfo: {
+    description: 'Show which WhatsApp chat this channel is linked to.',
+    async execute(ctx) {
+      const jid = utils.discord.channelIdToJid(ctx.channel?.id);
+      if (!jid) {
+        await ctx.reply('This channel is not linked to a WhatsApp chat.');
+        return;
+      }
+
+      const name = utils.whatsapp.jidToName(jid);
+      const displayJid = utils.whatsapp.formatJidForDisplay(jid) || jid;
+      const type = jid === 'status@broadcast'
+        ? 'Status'
+        : (jid.endsWith('@g.us') ? 'Group' : 'DM');
+
+      await ctx.reply(`Linked chat: **${name}**\nJID: \`${displayJid}\`\nType: ${type}`);
+    },
+  },
   pairwithcode: {
     description: 'Request a WhatsApp pairing code.',
     options: [

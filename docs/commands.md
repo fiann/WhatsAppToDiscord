@@ -10,6 +10,10 @@ All bot controls now run exclusively through Discord slash commands. Type `/` in
 Request a pairing code for a specific phone number.  
 Usage: `/pairwithcode number:<E.164 phone number>`
 
+### `/chatinfo`
+Show which WhatsApp chat the current channel is linked to (JID + type).  
+Usage: `/chatinfo`
+
 ### `/start`
 Create a brand-new WhatsApp conversation and channel link.  
 Usage: `/start contact:<phone number or saved contact name>`
