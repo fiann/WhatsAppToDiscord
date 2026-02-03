@@ -2557,6 +2557,7 @@ const whatsapp = {
     migrateKey(state.chats);
     migrateKey(state.contacts);
     migrateKey(state.goccRuns);
+    migrateKey(state.settings?.WhatsAppDiscordMentionLinks);
     const whitelist = state.settings?.Whitelist;
     if (Array.isArray(whitelist) && whitelist.length) {
       const normalized = whitelist.map((jid) => {
@@ -2743,7 +2744,7 @@ const whatsapp = {
     const qMsgType = this.getMessageType({ message: qMsg });
 
     const [nMsgType, message] = this.getMessage({ message: qMsg }, qMsgType);
-    const content = this.getContent(message, nMsgType, qMsgType);
+    const { content } = await this.getContent(message, nMsgType, qMsgType, { mentionTarget: 'name' });
     let file = null;
     if (qMsgType && context?.stanzaId) {
       const quoteParticipant = this.formatJid(context?.participant || context?.participantAlt);
@@ -2889,13 +2890,14 @@ const whatsapp = {
       || rawMsg?.key?.id
       || rawMsg?.id;
   },
-  getContent(msg, nMsgType, msgType) {
+  async getContent(msg, nMsgType, msgType, { mentionTarget = 'name' } = {}) {
     let content = '';
+    const discordMentions = new Set();
     if (msgType === 'viewOnceMessageV2') {
       content += 'View once message:\n';
     }
     if (msg == null) {
-      return content;
+      return { content, discordMentions: [] };
     }
     switch (nMsgType) {
       case 'conversation':
@@ -2934,12 +2936,65 @@ const whatsapp = {
     }
     const contextInfo = typeof msg === 'object' && msg !== null ? msg.contextInfo : undefined;
     const mentions = contextInfo?.mentionedJid || [];
+    const links = state.settings?.WhatsAppDiscordMentionLinks;
+    const hasLinks = links && typeof links === 'object';
+
+    const normalizeDiscordUserId = (value) => {
+      if (typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      return /^\d+$/.test(trimmed) ? trimmed : null;
+    };
+
+    const resolveLinkedDiscordUserId = async (jid) => {
+      if (!hasLinks) return null;
+      const formatted = this.formatJid(jid);
+      if (!formatted) return null;
+
+      const lookup = (candidate) => {
+        if (!candidate) return null;
+        return normalizeDiscordUserId(links[candidate]);
+      };
+
+      const direct = lookup(formatted);
+      if (direct) return { discordUserId: direct, jids: [formatted] };
+
+      const [primary, alternate] = await this.hydrateJidPair(formatted, null);
+      const resolved = this.resolveKnownJid(primary, alternate);
+      const found = lookup(resolved) || lookup(primary) || lookup(alternate);
+      const jids = [formatted, primary, alternate, resolved].filter(Boolean);
+      return found ? { discordUserId: found, jids } : null;
+    };
+
     for (const jid of mentions) {
-      const name = this.jidToName(jid);
-      const regex = new RegExp(`@${this.jidToPhone(jid)}\\b`, 'g');
-      content = content.replace(regex, `@${name}`);
+      const formattedMentionJid = this.formatJid(jid);
+      if (!formattedMentionJid) continue;
+
+      let replacement = `@${this.jidToName(formattedMentionJid)}`;
+      let tokens = [formattedMentionJid];
+
+      if (mentionTarget === 'discord') {
+        const linked = await resolveLinkedDiscordUserId(formattedMentionJid);
+        if (linked?.discordUserId) {
+          discordMentions.add(linked.discordUserId);
+          replacement = `<@${linked.discordUserId}>`;
+          tokens = linked.jids;
+        } else {
+          const [primary, alternate] = await this.hydrateJidPair(formattedMentionJid, null);
+          const resolved = this.resolveKnownJid(primary, alternate) || primary || alternate || formattedMentionJid;
+          replacement = `@${this.jidToName(resolved)}`;
+          tokens = [formattedMentionJid, primary, alternate, resolved].filter(Boolean);
+        }
+      }
+
+      const mentionTokens = [...new Set(tokens.map((candidate) => this.jidToPhone(candidate)).filter(Boolean))];
+      for (const token of mentionTokens) {
+        const regex = new RegExp(`@${token}\\b`, 'g');
+        content = content.replace(regex, replacement);
+      }
     }
-    return content;
+
+    return { content, discordMentions: [...discordMentions] };
   },
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;

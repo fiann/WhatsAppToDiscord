@@ -64,7 +64,7 @@ const setupWhatsAppHarness = async ({
       isStatusBroadcast: (raw) => raw?.key?.remoteJid === 'status@broadcast',
       getMessage: (raw) => ['conversation', { text: raw.message }],
       getSenderName: async () => 'Tester',
-      getContent: (message) => message.text,
+      getContent: async (message) => ({ content: message.text, discordMentions: [] }),
       getQuote: async () => null,
       getFile: async () => null,
       getProfilePic: async () => null,

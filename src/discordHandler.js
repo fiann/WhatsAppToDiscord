@@ -243,6 +243,10 @@ class CommandContext {
     return this.interaction?.options?.getChannel(name);
   }
 
+  getUserOption(name) {
+    return this.interaction?.options?.getUser(name);
+  }
+
 }
 
 const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) => {
@@ -252,6 +256,9 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
   let components = [];
   const webhook = await utils.discord.getOrCreateChannel(message.channelJid);
   const avatarURL = message.profilePic || DEFAULT_AVATAR_URL;
+  const mentionIdsRaw = Array.isArray(message?.discordMentions) ? message.discordMentions : [];
+  const mentionIds = [...new Set(mentionIdsRaw.map((id) => String(id)).filter((id) => /^\d+$/.test(id)))];
+  const allowedMentions = mentionIds.length ? { parse: [], users: mentionIds } : undefined;
   const content = utils.discord.convertWhatsappFormatting(message.content);
   const quoteContent = message.quote ? utils.discord.convertWhatsappFormatting(message.quote.content) : null;
 
@@ -353,7 +360,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
     const dcMessageId = state.lastMessages[message.id];
     if (dcMessageId) {
       try {
-        await utils.discord.safeWebhookEdit(webhook, dcMessageId, { content: msgContent || null, components }, message.channelJid);
+        await utils.discord.safeWebhookEdit(webhook, dcMessageId, { content: msgContent || null, components, allowedMentions }, message.channelJid);
         return;
       } catch (err) {
         state.logger?.error(err);
@@ -365,6 +372,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
       username: message.name,
       avatarURL,
       components,
+      allowedMentions,
     }, message.channelJid);
     if (message.id != null) {
       // bidirectional map automatically stores both directions
@@ -382,6 +390,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
         username: message.name,
         avatarURL,
         components,
+        allowedMentions,
       }, message.channelJid);
     }
 
@@ -407,6 +416,7 @@ const sendWhatsappMessage = async (message, mediaFiles = [], messageIds = []) =>
         files: fileChunks[i],
         avatarURL,
         components,
+        allowedMentions,
       };
       lastDcMessage = await utils.discord.safeWebhookSend(webhook, sendArgs, message.channelJid);
 
@@ -1214,6 +1224,144 @@ const commandHandlers = {
         // eslint-disable-next-line no-await-in-loop
         await ctx.reply(message.shift());
       }
+    },
+  },
+  linkmention: {
+    description: 'Link a WhatsApp contact to a Discord user so WhatsApp @mentions ping them in Discord.',
+    options: [
+      {
+        name: 'contact',
+        description: 'Number with country code or contact name.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+      {
+        name: 'user',
+        description: 'Target Discord user to mention.',
+        type: ApplicationCommandOptionTypes.USER,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const contact = ctx.getStringOption('contact');
+      const user = ctx.getUserOption('user');
+      if (!contact || !user?.id) {
+        await ctx.reply('Usage: `/linkmention contact:<name or number> user:<@user>`.');
+        return;
+      }
+
+      const jid = utils.whatsapp.toJid(contact);
+      if (!jid) {
+        await ctx.reply(`Couldn't find \`${contact}\`.`);
+        return;
+      }
+
+      const formatted = utils.whatsapp.formatJid(jid);
+      const [primary, alternate] = await utils.whatsapp.hydrateJidPair(formatted, null);
+      const targets = [...new Set([formatted, primary, alternate].filter(Boolean))];
+
+      if (!state.settings.WhatsAppDiscordMentionLinks || typeof state.settings.WhatsAppDiscordMentionLinks !== 'object') {
+        state.settings.WhatsAppDiscordMentionLinks = {};
+      }
+      for (const target of targets) {
+        state.settings.WhatsAppDiscordMentionLinks[target] = user.id;
+      }
+
+      await storage.saveSettings().catch(() => {});
+
+      const displayJid = primary || formatted;
+      const name = utils.whatsapp.jidToName(displayJid);
+      await ctx.reply(`Linked WhatsApp contact **${name}** (${displayJid}) to <@${user.id}>.`);
+    },
+  },
+  unlinkmention: {
+    description: 'Remove a WhatsApp→Discord mention link for a contact.',
+    options: [
+      {
+        name: 'contact',
+        description: 'Number with country code or contact name.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const contact = ctx.getStringOption('contact');
+      if (!contact) {
+        await ctx.reply('Usage: `/unlinkmention contact:<name or number>`.');
+        return;
+      }
+
+      const jid = utils.whatsapp.toJid(contact);
+      if (!jid) {
+        await ctx.reply(`Couldn't find \`${contact}\`.`);
+        return;
+      }
+
+      const formatted = utils.whatsapp.formatJid(jid);
+      const [primary, alternate] = await utils.whatsapp.hydrateJidPair(formatted, null);
+      const targets = [...new Set([formatted, primary, alternate].filter(Boolean))];
+
+      const links = state.settings?.WhatsAppDiscordMentionLinks;
+      if (!links || typeof links !== 'object') {
+        await ctx.reply('No mention links are currently configured.');
+        return;
+      }
+
+      let removed = 0;
+      for (const target of targets) {
+        if (Object.prototype.hasOwnProperty.call(links, target)) {
+          delete links[target];
+          removed += 1;
+        }
+      }
+
+      await storage.saveSettings().catch(() => {});
+
+      const displayJid = primary || formatted;
+      const name = utils.whatsapp.jidToName(displayJid);
+      if (!removed) {
+        await ctx.reply(`No mention link found for **${name}** (${displayJid}).`);
+        return;
+      }
+      await ctx.reply(`Removed mention link for **${name}** (${displayJid}).`);
+    },
+  },
+  mentionlinks: {
+    description: 'List WhatsApp contacts linked to Discord mentions.',
+    async execute(ctx) {
+      const links = state.settings?.WhatsAppDiscordMentionLinks;
+      if (!links || typeof links !== 'object' || !Object.keys(links).length) {
+        await ctx.reply('No mention links are currently configured.');
+        return;
+      }
+
+      const byDiscordId = new Map();
+      const isDiscordId = (value) => typeof value === 'string' && /^\d+$/.test(value.trim());
+
+      for (const [jid, discordIdRaw] of Object.entries(links)) {
+        const discordId = typeof discordIdRaw === 'string' ? discordIdRaw.trim() : '';
+        if (!jid || !isDiscordId(discordId)) continue;
+        const normalizedJid = utils.whatsapp.formatJid(jid) || jid;
+        const existing = byDiscordId.get(discordId) || new Set();
+        existing.add(normalizedJid);
+        byDiscordId.set(discordId, existing);
+      }
+
+      if (!byDiscordId.size) {
+        await ctx.reply('No valid mention links are currently configured.');
+        return;
+      }
+
+      const lines = [];
+      for (const [discordId, jids] of byDiscordId.entries()) {
+        const jidList = [...jids].filter(Boolean);
+        const preferred = jidList.find((jid) => utils.whatsapp.isPhoneJid(jid)) || jidList[0];
+        const name = preferred ? utils.whatsapp.jidToName(preferred) : 'Unknown';
+        const suffix = jidList.length > 1 ? ` (aliases: ${jidList.length})` : '';
+        lines.push(`- **${name}** (${preferred})${suffix} -> <@${discordId}>`);
+      }
+
+      await ctx.replyPartitioned(lines.join('\n'));
     },
   },
   addtowhitelist: {

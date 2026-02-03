@@ -73,6 +73,23 @@ Usage: `/waplatformsuffix enabled:<true|false>`
 
 ---
 
+## Mentions
+
+WA2DC can optionally translate WhatsApp @mentions into Discord user mentions, if you link a WhatsApp contact to a Discord user.
+
+### `/linkmention`
+Link a WhatsApp contact to a Discord user so future WhatsApp @mentions ping them in Discord.  
+Usage: `/linkmention contact:<phone number or saved contact name> user:<@user>`
+
+### `/unlinkmention`
+Remove a WhatsApp→Discord mention link for a contact.  
+Usage: `/unlinkmention contact:<phone number or saved contact name>`
+
+### `/mentionlinks`
+List all configured WhatsApp→Discord mention links.
+
+---
+
 ## Attachments & Downloads
 
 Defaults (out of the box):

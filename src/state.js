@@ -42,6 +42,7 @@ const state = {
     UpdatePromptMessage: null,
     RollbackPromptMessage: null,
     PinDurationSeconds: 7 * 24 * 60 * 60,
+    WhatsAppDiscordMentionLinks: {},
   },
   dcClient: null,
   waClient: null,

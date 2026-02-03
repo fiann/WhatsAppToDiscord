@@ -646,17 +646,19 @@ const connectToWhatsApp = async (retry = 1) => {
                 }
 
                 const [nMsgType, message] = utils.whatsapp.getMessage(rawMessage, messageType);
+                const { content, discordMentions } = await utils.whatsapp.getContent(message, nMsgType, messageType, { mentionTarget: 'discord' });
                 state.dcClient.emit('whatsappMessage', {
                     id: utils.whatsapp.getId(rawMessage),
                     name: await utils.whatsapp.getSenderName(rawMessage),
-                    content: utils.whatsapp.getContent(message, nMsgType, messageType),
+                    content,
                     quote: await utils.whatsapp.getQuote(rawMessage),
                     file: await utils.whatsapp.getFile(rawMessage, messageType),
                     profilePic: await utils.whatsapp.getProfilePic(rawMessage),
                     channelJid: await utils.whatsapp.getChannelJid(rawMessage),
                     isGroup: utils.whatsapp.isGroup(rawMessage),
                     isForwarded: utils.whatsapp.isForwarded(message),
-                    isEdit: messageType === 'editedMessage'
+                    isEdit: messageType === 'editedMessage',
+                    discordMentions,
                 });
                 const ts = utils.whatsapp.getTimestamp(rawMessage);
                 if (ts > state.startTime) state.startTime = ts;
