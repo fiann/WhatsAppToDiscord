@@ -115,3 +115,69 @@ test('Linked mentions work when WhatsApp provides LID JIDs but message text cont
   }
 });
 
+test('Linked mentions resolve when mention links were saved with a leading + phone JID', async () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+  const originalLinks = snapshotObject(state.settings.WhatsAppDiscordMentionLinks);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = {
+      contacts: state.contacts,
+      user: { id: '0@s.whatsapp.net' },
+      signalRepository: { lidMapping: {} },
+    };
+
+    const pnJid = '14155550123@s.whatsapp.net';
+    const legacyKey = '+14155550123@s.whatsapp.net';
+    const discordUserId = '123456789012345678';
+    state.contacts[pnJid] = 'Alice';
+    state.settings.WhatsAppDiscordMentionLinks = { [legacyKey]: discordUserId };
+
+    const msg = {
+      text: 'Hi @14155550123',
+      contextInfo: { mentionedJid: [pnJid] },
+    };
+
+    const result = await utils.whatsapp.getContent(msg, 'extendedTextMessage', 'extendedTextMessage', { mentionTarget: 'discord' });
+    assert.equal(result.content, `Hi <@${discordUserId}>`);
+    assert.deepEqual(result.discordMentions, [discordUserId]);
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+    state.settings.WhatsAppDiscordMentionLinks = originalLinks;
+  }
+});
+
+test('Linked mentions ping when WhatsApp message text uses the contact name token', async () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+  const originalLinks = snapshotObject(state.settings.WhatsAppDiscordMentionLinks);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = {
+      contacts: state.contacts,
+      user: { id: '0@s.whatsapp.net' },
+      signalRepository: { lidMapping: {} },
+    };
+
+    const pnJid = '14155550123@s.whatsapp.net';
+    const discordUserId = '123456789012345678';
+    state.contacts[pnJid] = 'Alice';
+    state.settings.WhatsAppDiscordMentionLinks = { [pnJid]: discordUserId };
+
+    const msg = {
+      text: 'Hi @Alice',
+      contextInfo: { mentionedJid: [pnJid] },
+    };
+
+    const result = await utils.whatsapp.getContent(msg, 'extendedTextMessage', 'extendedTextMessage', { mentionTarget: 'discord' });
+    assert.equal(result.content, `Hi <@${discordUserId}>`);
+    assert.deepEqual(result.discordMentions, [discordUserId]);
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+    state.settings.WhatsAppDiscordMentionLinks = originalLinks;
+  }
+});

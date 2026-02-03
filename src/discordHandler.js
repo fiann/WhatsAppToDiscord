@@ -1317,21 +1317,16 @@ const commandHandlers = {
       }
 
       const formatted = utils.whatsapp.formatJid(jid);
-      const [primary, alternate] = await utils.whatsapp.hydrateJidPair(formatted, null);
-      const targets = [...new Set([formatted, primary, alternate].filter(Boolean))];
 
       if (!state.settings.WhatsAppDiscordMentionLinks || typeof state.settings.WhatsAppDiscordMentionLinks !== 'object') {
         state.settings.WhatsAppDiscordMentionLinks = {};
       }
-      for (const target of targets) {
-        state.settings.WhatsAppDiscordMentionLinks[target] = user.id;
-      }
+      state.settings.WhatsAppDiscordMentionLinks[formatted] = user.id;
 
       await storage.saveSettings().catch(() => {});
 
-      const displayJid = primary || formatted;
-      const name = utils.whatsapp.jidToName(displayJid);
-      await ctx.reply(`Linked WhatsApp contact **${name}** (${displayJid}) to <@${user.id}>.`);
+      const name = utils.whatsapp.jidToName(formatted);
+      await ctx.reply(`Linked WhatsApp contact **${name}** (${formatted}) to <@${user.id}>.`);
     },
   },
   unlinkmention: {
@@ -1358,8 +1353,6 @@ const commandHandlers = {
       }
 
       const formatted = utils.whatsapp.formatJid(jid);
-      const [primary, alternate] = await utils.whatsapp.hydrateJidPair(formatted, null);
-      const targets = [...new Set([formatted, primary, alternate].filter(Boolean))];
 
       const links = state.settings?.WhatsAppDiscordMentionLinks;
       if (!links || typeof links !== 'object') {
@@ -1368,22 +1361,22 @@ const commandHandlers = {
       }
 
       let removed = 0;
-      for (const target of targets) {
-        if (Object.prototype.hasOwnProperty.call(links, target)) {
-          delete links[target];
+      for (const key of Object.keys(links)) {
+        if (utils.whatsapp.formatJid(key) !== formatted) continue;
+        if (Object.prototype.hasOwnProperty.call(links, key)) {
+          delete links[key];
           removed += 1;
         }
       }
 
       await storage.saveSettings().catch(() => {});
 
-      const displayJid = primary || formatted;
-      const name = utils.whatsapp.jidToName(displayJid);
+      const name = utils.whatsapp.jidToName(formatted);
       if (!removed) {
-        await ctx.reply(`No mention link found for **${name}** (${displayJid}).`);
+        await ctx.reply(`No mention link found for **${name}** (${formatted}).`);
         return;
       }
-      await ctx.reply(`Removed mention link for **${name}** (${displayJid}).`);
+      await ctx.reply(`Removed mention link for **${name}** (${formatted}).`);
     },
   },
   mentionlinks: {

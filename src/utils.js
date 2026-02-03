@@ -2535,13 +2535,42 @@ const whatsapp = {
     const [userPart, serverPart] = String(jid).split('@');
     if (!serverPart) return String(jid);
     const cleanUser = userPart.split(':')[0];
-    return `${cleanUser}@${serverPart}`;
+    const normalizedUser = (() => {
+      const server = String(serverPart).trim();
+      if (server !== 's.whatsapp.net' && server !== 'lid') return cleanUser;
+      const digitsOnly = String(cleanUser).replace(/\D/g, '');
+      return digitsOnly || cleanUser;
+    })();
+    return `${normalizedUser}@${serverPart}`;
   },
   isPhoneJid(jid = '') {
     return typeof jid === 'string' && jid.endsWith('@s.whatsapp.net');
   },
   isLidJid(jid = '') {
     return typeof jid === 'string' && jid.endsWith('@lid');
+  },
+  normalizeMentionLinks() {
+    const links = state.settings?.WhatsAppDiscordMentionLinks;
+    if (!links || typeof links !== 'object' || Array.isArray(links)) return false;
+
+    let changed = false;
+    for (const [jidRaw, discordId] of Object.entries({ ...links })) {
+      const normalized = this.formatJid(jidRaw);
+      if (!normalized || normalized === jidRaw) continue;
+
+      if (!Object.prototype.hasOwnProperty.call(links, normalized)) {
+        links[normalized] = discordId;
+      } else if (links[normalized] !== discordId) {
+        state.logger?.warn?.(
+          { from: jidRaw, to: normalized },
+          'Conflicting mention link keys; keeping normalized entry',
+        );
+      }
+
+      delete links[jidRaw];
+      changed = true;
+    }
+    return changed;
   },
   migrateLegacyJid(oldJid, newJid) {
     const legacy = this.formatJid(oldJid);
@@ -2616,6 +2645,11 @@ const whatsapp = {
   toJid(name) {
     if (!name) return null;
     const trimmed = String(name).trim();
+    const isPhoneLike = /^\+?[\d\s().-]+$/.test(trimmed);
+    if (isPhoneLike) {
+      const digits = trimmed.replace(/\D/g, '');
+      if (digits) return this.formatJid(`${digits}@s.whatsapp.net`);
+    }
     // eslint-disable-next-line no-restricted-globals
     if (!isNaN(trimmed)) { return this.formatJid(`${trimmed}@s.whatsapp.net`); }
     if (trimmed.includes('@')) {
@@ -2956,15 +2990,39 @@ const whatsapp = {
         return normalizeDiscordUserId(links[candidate]);
       };
 
-      const direct = lookup(formatted);
-      if (direct) return { discordUserId: direct, jids: [formatted] };
+      const lookupCandidates = (candidate) => {
+        const normalized = this.formatJid(candidate);
+        if (!normalized) return [];
+        const [userPart, serverPart] = normalized.split('@');
+        const candidates = [normalized];
+        if ((serverPart === 's.whatsapp.net' || serverPart === 'lid') && /^\d+$/.test(userPart)) {
+          candidates.push(`+${userPart}@${serverPart}`);
+        }
+        return [...new Set(candidates)];
+      };
+
+      const tryLookup = (candidate) => {
+        for (const key of lookupCandidates(candidate)) {
+          const found = lookup(key);
+          if (found) return { discordUserId: found, keys: lookupCandidates(candidate) };
+        }
+        return null;
+      };
+
+      const direct = tryLookup(formatted);
+      if (direct) return { discordUserId: direct.discordUserId, jids: [formatted, ...direct.keys] };
 
       const [primary, alternate] = await this.hydrateJidPair(formatted, null);
       const resolved = this.resolveKnownJid(primary, alternate);
-      const found = lookup(resolved) || lookup(primary) || lookup(alternate);
+      const resolvedCandidate = resolved || primary || alternate;
+      const found = tryLookup(resolvedCandidate) || tryLookup(primary) || tryLookup(alternate);
       const jids = [formatted, primary, alternate, resolved].filter(Boolean);
-      return found ? { discordUserId: found, jids } : null;
+      return found ? { discordUserId: found.discordUserId, jids: [...jids, ...found.keys] } : null;
     };
+
+    const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const buildMentionRegex = (token) => new RegExp(`@${escapeRegex(token)}(?=\\W|$)`, 'g');
+    const trailingMentions = new Set();
 
     for (const jid of mentions) {
       const formattedMentionJid = this.formatJid(jid);
@@ -2972,6 +3030,8 @@ const whatsapp = {
 
       let replacement = `@${this.jidToName(formattedMentionJid)}`;
       let tokens = [formattedMentionJid];
+      let nameToken = this.jidToName(formattedMentionJid);
+      let shouldAppendIfNotFound = false;
 
       if (mentionTarget === 'discord') {
         const linked = await resolveLinkedDiscordUserId(formattedMentionJid);
@@ -2979,19 +3039,45 @@ const whatsapp = {
           discordMentions.add(linked.discordUserId);
           replacement = `<@${linked.discordUserId}>`;
           tokens = linked.jids;
+          nameToken = this.jidToName(this.resolveKnownJid(...linked.jids) || formattedMentionJid);
+          shouldAppendIfNotFound = true;
         } else {
           const [primary, alternate] = await this.hydrateJidPair(formattedMentionJid, null);
           const resolved = this.resolveKnownJid(primary, alternate) || primary || alternate || formattedMentionJid;
           replacement = `@${this.jidToName(resolved)}`;
           tokens = [formattedMentionJid, primary, alternate, resolved].filter(Boolean);
+          nameToken = this.jidToName(resolved);
         }
       }
 
       const mentionTokens = [...new Set(tokens.map((candidate) => this.jidToPhone(candidate)).filter(Boolean))];
+      const mentionTextCandidates = new Set();
       for (const token of mentionTokens) {
-        const regex = new RegExp(`@${token}\\b`, 'g');
-        content = content.replace(regex, replacement);
+        if (!token) continue;
+        mentionTextCandidates.add(token);
+        if (/^\d+$/.test(token)) mentionTextCandidates.add(`+${token}`);
       }
+      if (typeof nameToken === 'string') {
+        const trimmed = nameToken.trim();
+        if (trimmed && trimmed !== 'Unknown' && trimmed !== 'You') mentionTextCandidates.add(trimmed);
+      }
+
+      let replaced = false;
+      for (const token of mentionTextCandidates) {
+        const regex = buildMentionRegex(token);
+        const next = content.replace(regex, replacement);
+        if (next === content) continue;
+        content = next;
+        replaced = true;
+      }
+      if (!replaced && shouldAppendIfNotFound) {
+        trailingMentions.add(replacement);
+      }
+    }
+
+    if (mentionTarget === 'discord' && trailingMentions.size) {
+      const suffix = [...trailingMentions].join(' ');
+      content = content ? `${content} ${suffix}` : suffix;
     }
 
     return { content, discordMentions: [...discordMentions] };

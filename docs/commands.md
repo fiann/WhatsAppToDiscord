@@ -80,6 +80,7 @@ WA2DC can optionally translate WhatsApp @mentions into Discord user mentions, if
 ### `/linkmention`
 Link a WhatsApp contact to a Discord user so future WhatsApp @mentions ping them in Discord.  
 Usage: `/linkmention contact:<phone number or saved contact name> user:<@user>`
+Note: phone numbers can include `+`, spaces, or dashes; WA2DC normalizes them automatically.
 
 ### `/unlinkmention`
 Remove a WhatsApp→Discord mention link for a contact.  

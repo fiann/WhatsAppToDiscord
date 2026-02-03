@@ -88,6 +88,10 @@ if (!globalThis.crypto) {
   if (isSmokeTest) {
     state.logger.info('Running in smoke-test mode; external clients are skipped.');
   }
+  if (utils.whatsapp.normalizeMentionLinks()) {
+    await storage.saveSettings().catch(() => {});
+    state.logger.info('Normalized WhatsApp→Discord mention links.');
+  }
 
   utils.ensureDownloadServer();
 
