@@ -1417,6 +1417,107 @@ const commandHandlers = {
       await ctx.replyPartitioned(lines.join('\n'));
     },
   },
+  jidinfo: {
+    description: 'Show known WhatsApp JID variants (PN/LID) for a contact and whether they are linked for mentions.',
+    options: [
+      {
+        name: 'contact',
+        description: 'Number with country code or contact name.',
+        type: ApplicationCommandOptionTypes.STRING,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const contact = ctx.getStringOption('contact');
+      if (!contact) {
+        await ctx.reply('Usage: `/jidinfo contact:<name or number>`.');
+        return;
+      }
+
+      const jid = utils.whatsapp.toJid(contact);
+      if (!jid) {
+        await ctx.reply(`Couldn't find \`${contact}\`.`);
+        return;
+      }
+
+      const formatted = utils.whatsapp.formatJid(jid);
+      const name = utils.whatsapp.jidToName(formatted);
+      const normalizedName = String(name || '')
+        .trim()
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+
+      const isSameName = (value) => {
+        if (typeof value !== 'string') return false;
+        const normalized = value
+          .trim()
+          .normalize('NFKC')
+          .toLowerCase()
+          .replace(/\s+/g, ' ');
+        return normalized && normalized === normalizedName;
+      };
+
+      const candidates = new Set([formatted]);
+      const addIfMatch = (jidCandidate, storedName) => {
+        if (!jidCandidate) return;
+        if (!isSameName(storedName)) return;
+        const normalized = utils.whatsapp.formatJid(jidCandidate);
+        if (normalized) candidates.add(normalized);
+      };
+
+      for (const [jidCandidate, storedName] of Object.entries(state.contacts || {})) {
+        addIfMatch(jidCandidate, storedName);
+      }
+      for (const [jidCandidate, storedName] of Object.entries(state.waClient?.contacts || {})) {
+        addIfMatch(jidCandidate, storedName);
+      }
+
+      const links = state.settings?.WhatsAppDiscordMentionLinks;
+      const linkEntries = [];
+      if (links && typeof links === 'object') {
+        for (const [linkJid, discordIdRaw] of Object.entries(links)) {
+          const normalizedLinkJid = utils.whatsapp.formatJid(linkJid);
+          if (!normalizedLinkJid) continue;
+          if (!candidates.has(normalizedLinkJid)) continue;
+          linkEntries.push({
+            key: linkJid,
+            jid: normalizedLinkJid,
+            discordId: typeof discordIdRaw === 'string' ? discordIdRaw.trim() : '',
+          });
+        }
+      }
+
+      const classify = (jidValue) => {
+        if (utils.whatsapp.isPhoneJid(jidValue)) return 'PN';
+        if (utils.whatsapp.isLidJid(jidValue)) return 'LID';
+        if (typeof jidValue === 'string' && jidValue.endsWith('@g.us')) return 'GROUP';
+        return 'OTHER';
+      };
+
+      const jidList = [...candidates].filter(Boolean).sort((a, b) => a.localeCompare(b));
+      const lines = [];
+      lines.push(`Contact: **${name}**`);
+      lines.push(`Resolved: \`${formatted}\` (${classify(formatted)})`);
+      lines.push('Known JIDs:');
+      for (const jidValue of jidList) {
+        const linked = linkEntries.filter((entry) => entry.jid === jidValue && /^\d+$/.test(entry.discordId));
+        const linkSuffix = linked.length
+          ? ` -> ${linked.map((entry) => `<@${entry.discordId}>`).join(', ')}`
+          : '';
+        lines.push(`- \`${jidValue}\` (${classify(jidValue)})${linkSuffix}`);
+      }
+      if (linkEntries.length) {
+        lines.push('Raw mention-link keys:');
+        for (const entry of linkEntries) {
+          const suffix = /^\d+$/.test(entry.discordId) ? ` -> <@${entry.discordId}>` : '';
+          lines.push(`- \`${entry.key}\`${suffix}`);
+        }
+      }
+
+      await ctx.replyPartitioned(lines.join('\n'));
+    },
+  },
   addtowhitelist: {
     description: 'Add a channel to the whitelist.',
     options: [

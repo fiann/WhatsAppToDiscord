@@ -76,11 +76,13 @@ Usage: `/waplatformsuffix enabled:<true|false>`
 ## Mentions
 
 WA2DC can optionally translate WhatsApp @mentions into Discord user mentions, if you link a WhatsApp contact to a Discord user.
+This only works for **real WhatsApp mentions** (select the person from WhatsApp’s mention picker); manually typing `@name` without selecting won’t include mention metadata and can’t be translated reliably.
 
 ### `/linkmention`
 Link a WhatsApp contact to a Discord user so future WhatsApp @mentions ping them in Discord.  
 Usage: `/linkmention contact:<phone number or saved contact name> user:<@user>`
 Note: phone numbers can include `+`, spaces, or dashes; WA2DC normalizes them automatically.
+Note: WhatsApp can represent the same person as a phone JID (`...@s.whatsapp.net`, “PN”) and/or a Linked-Device ID (`...@lid`, “LID”). If mentions don’t ping even though the link exists, you may be receiving **LID mentions**. You can link the LID directly by passing it as the contact value, e.g. `/linkmention contact:<someid@lid> user:<@user>`. On older versions, you may need to link **both** the PN and LID for the same contact.
 
 ### `/unlinkmention`
 Remove a WhatsApp→Discord mention link for a contact.  
@@ -88,6 +90,13 @@ Usage: `/unlinkmention contact:<phone number or saved contact name>`
 
 ### `/mentionlinks`
 List all configured WhatsApp→Discord mention links.
+
+### `/jidinfo`
+Show the known WhatsApp IDs (PN `@s.whatsapp.net` and/or LID `@lid`) for a contact, and whether those IDs are linked for mention pings.  
+Usage: `/jidinfo contact:<phone number or saved contact name>`
+How to find PN/LID:
+- Easiest: run `/jidinfo contact:<name or number>` and look for lines marked `(PN)` and `(LID)`.
+- Advanced: open `storage/contacts` and search for the contact name; keys ending in `@s.whatsapp.net` are PN, keys ending in `@lid` are LID.
 
 ---
 

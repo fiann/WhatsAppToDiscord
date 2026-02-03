@@ -2985,6 +2985,27 @@ const whatsapp = {
       const formatted = this.formatJid(jid);
       if (!formatted) return null;
 
+      const normalizeNameForMatch = (value) => {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        return trimmed
+          .normalize('NFKC')
+          .toLowerCase()
+          .replace(/\s+/g, ' ');
+      };
+
+      const getStoredContactName = (candidateJid) => {
+        const normalized = this.formatJid(candidateJid);
+        if (!normalized) return null;
+        const stored = state.contacts?.[normalized] || state.waClient?.contacts?.[normalized];
+        const normalizedName = normalizeNameForMatch(stored);
+        if (!normalizedName) return null;
+        if (normalizedName === 'unknown' || normalizedName === 'you') return null;
+        if (/^\d+$/.test(normalizedName)) return null;
+        return normalizedName;
+      };
+
       const lookup = (candidate) => {
         if (!candidate) return null;
         return normalizeDiscordUserId(links[candidate]);
@@ -3017,7 +3038,33 @@ const whatsapp = {
       const resolvedCandidate = resolved || primary || alternate;
       const found = tryLookup(resolvedCandidate) || tryLookup(primary) || tryLookup(alternate);
       const jids = [formatted, primary, alternate, resolved].filter(Boolean);
-      return found ? { discordUserId: found.discordUserId, jids: [...jids, ...found.keys] } : null;
+      if (found) return { discordUserId: found.discordUserId, jids: [...jids, ...found.keys] };
+
+      // Fallback: if WhatsApp provides LID JIDs but the PN<->LID mapping store
+      // can't resolve it, try matching based on the stored contact name.
+      const mentionName = getStoredContactName(formatted)
+        || getStoredContactName(resolvedCandidate)
+        || getStoredContactName(primary)
+        || getStoredContactName(alternate);
+      if (!mentionName) return null;
+
+      const matchingKeys = [];
+      const candidateDiscordIds = new Set();
+      for (const [linkJid, discordIdRaw] of Object.entries(links)) {
+        const discordUserId = normalizeDiscordUserId(discordIdRaw);
+        if (!discordUserId) continue;
+        const linkName = getStoredContactName(linkJid);
+        if (!linkName) continue;
+        if (linkName !== mentionName) continue;
+        matchingKeys.push(linkJid);
+        candidateDiscordIds.add(discordUserId);
+      }
+      if (candidateDiscordIds.size !== 1) return null;
+
+      return {
+        discordUserId: [...candidateDiscordIds][0],
+        jids: [...new Set([...jids, ...matchingKeys].filter(Boolean))],
+      };
     };
 
     const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
