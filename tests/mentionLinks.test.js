@@ -219,3 +219,55 @@ test('Linked mentions resolve for LID mentions without mapping when the stored c
     state.settings.WhatsAppDiscordMentionLinks = originalLinks;
   }
 });
+
+test('Discord user mentions can be converted to WhatsApp mentions via mention links', async () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+  const originalLinks = snapshotObject(state.settings.WhatsAppDiscordMentionLinks);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = {
+      contacts: state.contacts,
+      user: { id: '0@s.whatsapp.net' },
+      signalRepository: { lidMapping: {} },
+    };
+
+    const pnJid = '14155550123@s.whatsapp.net';
+    const discordUserId = '123456789012345678';
+    state.contacts[pnJid] = 'Alice';
+    state.settings.WhatsAppDiscordMentionLinks = { [pnJid]: discordUserId };
+
+    const input = 'Hi @Bob';
+    const result = await utils.whatsapp.applyDiscordMentionLinks(input, [
+      { discordUserId, displayTokens: ['Bob'] },
+    ]);
+
+    assert.equal(result.text, 'Hi @14155550123');
+    assert.deepEqual(result.mentionJids, [pnJid]);
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+    state.settings.WhatsAppDiscordMentionLinks = originalLinks;
+  }
+});
+
+test('Outgoing mention parsing supports phone-number tokens', async () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = {
+      contacts: state.contacts,
+      user: { id: '0@s.whatsapp.net' },
+      signalRepository: { lidMapping: {} },
+    };
+
+    const mentions = utils.whatsapp.getMentionedJids('hello @+14155550123 and @14155550123!');
+    assert.deepEqual([...new Set(mentions)].sort(), ['14155550123@s.whatsapp.net']);
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+  }
+});

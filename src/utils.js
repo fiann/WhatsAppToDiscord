@@ -2771,18 +2771,98 @@ const whatsapp = {
     return converted;
   },
   getMentionedJids(text) {
-    const mentions = [];
-    if (!text) return mentions;
-    
-    const lower = text.replace(/<@!?\d+>/g, '').toLowerCase();
+    const mentions = new Set();
+    if (!text) return [];
 
-    for (const [jid, name] of Object.entries(state.contacts)) {
+    const cleaned = text.replace(/<@!?\d+>/g, '');
+    const lower = cleaned.toLowerCase();
+    const contactStore = state.waClient?.contacts || state.contacts || {};
+
+    for (const [jid, name] of Object.entries(contactStore)) {
       if (!name) continue;
-      if (lower.includes(`@${name.toLowerCase()}`)) {
-        mentions.push(jid);
+      if (lower.includes(`@${String(name).toLowerCase()}`)) {
+        const formatted = this.formatJid(jid);
+        if (formatted) mentions.add(formatted);
       }
     }
-    return mentions;
+
+    // Support phone-number tokens like "@14155550123" (or "@+14155550123").
+    const phoneMentionRegex = /@(\+?\d{7,15})(?=\W|$)/g;
+    let match;
+    while ((match = phoneMentionRegex.exec(cleaned)) !== null) {
+      const digits = String(match[1] || '').replace(/\D/g, '');
+      if (!digits) continue;
+      const jid = this.formatJid(`${digits}@s.whatsapp.net`);
+      if (jid) mentions.add(jid);
+    }
+
+    return [...mentions];
+  },
+  getLinkedJidsForDiscordUserId(discordUserId) {
+    const links = state.settings?.WhatsAppDiscordMentionLinks;
+    if (!links || typeof links !== 'object' || Array.isArray(links)) return [];
+    const normalizedId = typeof discordUserId === 'string' ? discordUserId.trim() : String(discordUserId || '').trim();
+    if (!/^\d+$/.test(normalizedId)) return [];
+
+    const results = new Set();
+    for (const [jidRaw, discordIdRaw] of Object.entries(links)) {
+      const storedId = typeof discordIdRaw === 'string' ? discordIdRaw.trim() : '';
+      if (storedId !== normalizedId) continue;
+      const formatted = this.formatJid(jidRaw);
+      if (formatted) results.add(formatted);
+    }
+    return [...results];
+  },
+  async applyDiscordMentionLinks(text, mentionDescriptors = [], { appendTrailing = false } = {}) {
+    if (!text) return { text, mentionJids: [] };
+    if (!Array.isArray(mentionDescriptors) || mentionDescriptors.length === 0) {
+      return { text, mentionJids: [] };
+    }
+
+    const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const buildMentionRegex = (token) => new RegExp(`@${escapeRegex(token)}(?=\\W|$)`, 'gi');
+
+    const mentionJids = new Set();
+    let nextText = text;
+    const appended = new Set();
+
+    for (const descriptor of mentionDescriptors) {
+      const discordUserId = descriptor?.discordUserId;
+      const displayTokens = Array.isArray(descriptor?.displayTokens) ? descriptor.displayTokens : [];
+      if (!discordUserId) continue;
+
+      const linked = this.getLinkedJidsForDiscordUserId(discordUserId);
+      if (!linked.length) continue;
+
+      // Prefer a phone JID when available; otherwise try to hydrate LID->PN.
+      let mentionJid = linked.find((jid) => this.isPhoneJid(jid)) || linked[0];
+      const [primary, alternate] = await this.hydrateJidPair(mentionJid, null);
+      mentionJid = this.resolveKnownJid(primary, alternate) || primary || alternate || mentionJid;
+      if (!mentionJid) continue;
+
+      const phoneToken = this.jidToPhone(mentionJid);
+      const replacementToken = phoneToken ? `@${phoneToken}` : `@${this.jidToName(mentionJid)}`;
+
+      let replaced = false;
+      const candidates = [...new Set(displayTokens.map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean))];
+      for (const token of candidates) {
+        const regex = buildMentionRegex(token);
+        const updated = nextText.replace(regex, replacementToken);
+        if (updated === nextText) continue;
+        nextText = updated;
+        replaced = true;
+      }
+
+      if (replaced) {
+        mentionJids.add(mentionJid);
+      } else if (appendTrailing && !appended.has(mentionJid)) {
+        nextText = nextText ? `${nextText} ${replacementToken}` : replacementToken;
+        appended.add(mentionJid);
+        mentionJids.add(mentionJid);
+      }
+    }
+
+    return { text: nextText, mentionJids: [...mentionJids] };
   },
   async sendQR(qrString) {
     await (await discord.getControlChannel())

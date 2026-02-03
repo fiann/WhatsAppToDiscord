@@ -907,7 +907,29 @@ const connectToWhatsApp = async (retry = 1) => {
             text = text.replace(/\s{2,}/g, ' ').trim();
         }
 
-        const mentionJids = utils.whatsapp.getMentionedJids(text);
+        const replyMentionId = message.reference ? message.mentions?.repliedUser?.id : null;
+        const mentionDescriptors = [];
+        const mentionedUsers = message.mentions?.users ? [...message.mentions.users.values()] : [];
+        for (const user of mentionedUsers) {
+            if (!user?.id) continue;
+            if (replyMentionId && user.id === replyMentionId) continue;
+            const tokens = new Set();
+            const member = message.mentions?.members?.get(user.id);
+            if (member?.displayName) tokens.add(member.displayName);
+            if (user.globalName) tokens.add(user.globalName);
+            if (user.username) tokens.add(user.username);
+            mentionDescriptors.push({ discordUserId: user.id, displayTokens: [...tokens] });
+        }
+
+        const linkedMentions = typeof utils.whatsapp.applyDiscordMentionLinks === 'function'
+            ? await utils.whatsapp.applyDiscordMentionLinks(text, mentionDescriptors)
+            : { text, mentionJids: [] };
+        text = linkedMentions.text ?? text;
+
+        const mentionJids = [...new Set([
+            ...linkedMentions.mentionJids,
+            ...utils.whatsapp.getMentionedJids(text),
+        ])];
 
         if (shouldSendAttachments) {
             let first = true;
@@ -1002,7 +1024,30 @@ const connectToWhatsApp = async (retry = 1) => {
             const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
             text = `*${prefix}*\n${text}`;
         }
-        const editMentions = utils.whatsapp.getMentionedJids(text);
+
+        const replyMentionId = message.reference ? message.mentions?.repliedUser?.id : null;
+        const mentionDescriptors = [];
+        const mentionedUsers = message.mentions?.users ? [...message.mentions.users.values()] : [];
+        for (const user of mentionedUsers) {
+            if (!user?.id) continue;
+            if (replyMentionId && user.id === replyMentionId) continue;
+            const tokens = new Set();
+            const member = message.mentions?.members?.get(user.id);
+            if (member?.displayName) tokens.add(member.displayName);
+            if (user.globalName) tokens.add(user.globalName);
+            if (user.username) tokens.add(user.username);
+            mentionDescriptors.push({ discordUserId: user.id, displayTokens: [...tokens] });
+        }
+
+        const linkedMentions = typeof utils.whatsapp.applyDiscordMentionLinks === 'function'
+            ? await utils.whatsapp.applyDiscordMentionLinks(text, mentionDescriptors)
+            : { text, mentionJids: [] };
+        text = linkedMentions.text ?? text;
+
+        const editMentions = [...new Set([
+            ...linkedMentions.mentionJids,
+            ...utils.whatsapp.getMentionedJids(text),
+        ])];
         try {
             const editMsg = await client.sendMessage(
                 jid,
