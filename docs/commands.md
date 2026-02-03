@@ -73,6 +73,14 @@ Usage: `/waplatformsuffix enabled:<true|false>`
 
 ---
 
+## Privacy
+
+### `/hidephonenumbers`
+Hide WhatsApp phone numbers on Discord (use pseudonyms when a real contact name isn’t available).  
+Usage: `/hidephonenumbers enabled:<true|false>`
+
+---
+
 ## Mentions
 
 WA2DC can optionally translate WhatsApp @mentions into Discord user mentions, if you link a WhatsApp contact to a Discord user.

@@ -115,6 +115,25 @@ const ensureDownloadServerSecret = () => {
   return Buffer.from(secret, 'base64url');
 };
 
+const getPrivacySaltKey = () => {
+  const secret = state.settings?.PrivacySalt;
+  if (typeof secret !== 'string' || !secret) return null;
+  try {
+    return Buffer.from(secret, 'base64url');
+  } catch {
+    return null;
+  }
+};
+
+const ensurePrivacySaltKey = () => {
+  const existing = getPrivacySaltKey();
+  if (existing) return existing;
+  const secret = crypto.randomBytes(32).toString('base64url');
+  state.settings.PrivacySalt = secret;
+  storage.saveSettings?.().catch(() => {});
+  return Buffer.from(secret, 'base64url');
+};
+
 const signDownloadTokenPayload = (payloadBase64) => {
   const secretKey = getDownloadServerSecretKey();
   if (!secretKey) return null;
@@ -1722,7 +1741,7 @@ const discord = {
     }
 
     this._unfinishedGoccCalls++;
-    const name = whatsapp.jidToName(normalizedJid);
+    const name = whatsapp.jidToChannelName(normalizedJid);
     const channel = await this.createChannel(name).catch((err) => {
       if (err.code === 50035) {
         return this.createChannel('invalid-name');
@@ -2530,6 +2549,44 @@ const whatsapp = {
     if (!jid) return '';
     return String(jid).split(':')[0].split('@')[0];
   },
+  ensurePrivacySalt() {
+    return ensurePrivacySaltKey();
+  },
+  isPhoneLike(value) {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (/[a-z]/i.test(trimmed)) return false;
+    const digits = trimmed.replace(/\D/g, '');
+    return digits.length >= 7 && digits.length <= 15;
+  },
+  privacyTagForJid(jid) {
+    const key = ensurePrivacySaltKey();
+    const normalized = this.formatJid(jid) || String(jid || '');
+    if (!normalized) return 'unknown';
+    const digest = crypto.createHmac('sha256', key)
+      .update(normalized, 'utf8')
+      .digest('base64url');
+    return digest.slice(0, 10);
+  },
+  anonymousName(jid) {
+    const tag = this.privacyTagForJid(jid);
+    return `WA User ${tag}`;
+  },
+  anonymousChannelName(jid) {
+    const normalized = this.formatJid(jid) || String(jid || '');
+    const tag = this.privacyTagForJid(normalized);
+    if (normalized === 'status@broadcast') return 'status';
+    if (typeof normalized === 'string' && normalized.endsWith('@g.us')) return `wa-group-${tag}`;
+    return `wa-user-${tag}`;
+  },
+  formatJidForDisplay(jid) {
+    const formatted = this.formatJid(jid) || String(jid || '');
+    if (!formatted) return '';
+    if (!state.settings?.HidePhoneNumbers) return formatted;
+    if (!this.isPhoneJid(formatted)) return formatted;
+    return `pn:redacted:${this.privacyTagForJid(formatted)}`;
+  },
   formatJid(jid) {
     if (!jid) return null;
     const [userPart, serverPart] = String(jid).split('@');
@@ -2632,15 +2689,24 @@ const whatsapp = {
     return jid.startsWith(this.jidToPhone(myJID)) && !jid.endsWith('@g.us');
   },
   jidToName(jid, pushName) {
-    if (this.isMe(state.waClient.user.id, jid)) { return 'You'; }
-    const contactName = state.waClient.contacts[this.formatJid(jid)];
-    const candidates = [contactName, pushName, this.jidToPhone(jid)];
+    const formatted = this.formatJid(jid) || String(jid || '');
+    const myJid = state.waClient?.user?.id;
+    if (myJid && formatted && this.isMe(myJid, formatted)) { return 'You'; }
+    const contactName = (formatted && (state.waClient?.contacts?.[formatted] ?? state.contacts?.[formatted])) || null;
+    const hidePhones = Boolean(state.settings?.HidePhoneNumbers);
+    const candidates = [contactName, pushName];
     for (const candidate of candidates) {
       if (typeof candidate !== 'string') continue;
       const trimmed = candidate.trim();
-      if (trimmed) return trimmed;
+      if (!trimmed) continue;
+      if (hidePhones && this.isPhoneLike(trimmed)) continue;
+      return trimmed;
     }
-    return 'Unknown';
+    if (!hidePhones) {
+      const fallback = this.jidToPhone(formatted);
+      return fallback ? fallback : 'Unknown';
+    }
+    return formatted ? this.anonymousName(formatted) : 'Unknown';
   },
   toJid(name) {
     if (!name) return null;
@@ -2655,15 +2721,44 @@ const whatsapp = {
     if (trimmed.includes('@')) {
       return this.formatJid(trimmed);
     }
+    if (state.settings?.HidePhoneNumbers) {
+      const match = trimmed.match(/^wa-(?:user|group)-([a-z0-9_-]{6,})$/i)
+        || trimmed.match(/^wa\s+(?:user|group)\s+([a-z0-9_-]{6,})$/i);
+      const tag = match?.[1];
+      if (tag) {
+        const jidCandidates = new Set([
+          ...Object.keys(state.waClient?.contacts || {}),
+          ...Object.keys(state.contacts || {}),
+          ...Object.keys(state.chats || {}),
+        ]);
+        for (const jidCandidate of jidCandidates) {
+          if (!jidCandidate) continue;
+          if (this.privacyTagForJid(jidCandidate) === tag) {
+            return this.formatJid(jidCandidate);
+          }
+        }
+      }
+    }
     const normalized = trimmed.toLowerCase();
-    const matches = Object.keys(state.waClient.contacts)
-      .filter((key) => state.waClient.contacts[key]
-        && state.waClient.contacts[key].toLowerCase().trim() === normalized);
+    const contactStore = state.waClient?.contacts || state.contacts || {};
+    const matches = Object.keys(contactStore)
+      .filter((key) => contactStore[key]
+        && contactStore[key].toLowerCase().trim() === normalized);
     const preferred = matches.find((jid) => this.isPhoneJid(jid)) || matches[0];
     return this.formatJid(preferred);
   },
+  jidToChannelName(jid, pushName) {
+    const hidePhones = Boolean(state.settings?.HidePhoneNumbers);
+    if (!hidePhones) return this.jidToName(jid, pushName);
+    const formatted = this.formatJid(jid) || String(jid || '');
+    const name = this.jidToName(formatted, pushName);
+    if (!name || name === 'Unknown') return this.anonymousChannelName(formatted);
+    if (formatted && name === this.anonymousName(formatted)) return this.anonymousChannelName(formatted);
+    if (this.isPhoneLike(name)) return this.anonymousChannelName(formatted);
+    return name;
+  },
   contacts() {
-    return Object.values(state.waClient.contacts);
+    return Object.values(state.waClient?.contacts || {});
   },
   convertDiscordFormatting(text = '') {
     if (!text) return text;

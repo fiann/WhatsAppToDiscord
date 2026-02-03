@@ -1326,7 +1326,8 @@ const commandHandlers = {
       await storage.saveSettings().catch(() => {});
 
       const name = utils.whatsapp.jidToName(formatted);
-      await ctx.reply(`Linked WhatsApp contact **${name}** (${formatted}) to <@${user.id}>.`);
+      const displayJid = utils.whatsapp.formatJidForDisplay(formatted);
+      await ctx.reply(`Linked WhatsApp contact **${name}** (${displayJid}) to <@${user.id}>.`);
     },
   },
   unlinkmention: {
@@ -1372,11 +1373,12 @@ const commandHandlers = {
       await storage.saveSettings().catch(() => {});
 
       const name = utils.whatsapp.jidToName(formatted);
+      const displayJid = utils.whatsapp.formatJidForDisplay(formatted);
       if (!removed) {
-        await ctx.reply(`No mention link found for **${name}** (${formatted}).`);
+        await ctx.reply(`No mention link found for **${name}** (${displayJid}).`);
         return;
       }
-      await ctx.reply(`Removed mention link for **${name}** (${formatted}).`);
+      await ctx.reply(`Removed mention link for **${name}** (${displayJid}).`);
     },
   },
   mentionlinks: {
@@ -1408,10 +1410,13 @@ const commandHandlers = {
       const lines = [];
       for (const [discordId, jids] of byDiscordId.entries()) {
         const jidList = [...jids].filter(Boolean);
-        const preferred = jidList.find((jid) => utils.whatsapp.isPhoneJid(jid)) || jidList[0];
+        const preferred = state.settings?.HidePhoneNumbers
+          ? (jidList.find((jid) => !utils.whatsapp.isPhoneJid(jid)) || jidList[0])
+          : (jidList.find((jid) => utils.whatsapp.isPhoneJid(jid)) || jidList[0]);
         const name = preferred ? utils.whatsapp.jidToName(preferred) : 'Unknown';
+        const displayJid = preferred ? utils.whatsapp.formatJidForDisplay(preferred) : 'Unknown';
         const suffix = jidList.length > 1 ? ` (aliases: ${jidList.length})` : '';
-        lines.push(`- **${name}** (${preferred})${suffix} -> <@${discordId}>`);
+        lines.push(`- **${name}** (${displayJid})${suffix} -> <@${discordId}>`);
       }
 
       await ctx.replyPartitioned(lines.join('\n'));
@@ -1498,20 +1503,20 @@ const commandHandlers = {
       const jidList = [...candidates].filter(Boolean).sort((a, b) => a.localeCompare(b));
       const lines = [];
       lines.push(`Contact: **${name}**`);
-      lines.push(`Resolved: \`${formatted}\` (${classify(formatted)})`);
+      lines.push(`Resolved: \`${utils.whatsapp.formatJidForDisplay(formatted)}\` (${classify(formatted)})`);
       lines.push('Known JIDs:');
       for (const jidValue of jidList) {
         const linked = linkEntries.filter((entry) => entry.jid === jidValue && /^\d+$/.test(entry.discordId));
         const linkSuffix = linked.length
           ? ` -> ${linked.map((entry) => `<@${entry.discordId}>`).join(', ')}`
           : '';
-        lines.push(`- \`${jidValue}\` (${classify(jidValue)})${linkSuffix}`);
+        lines.push(`- \`${utils.whatsapp.formatJidForDisplay(jidValue)}\` (${classify(jidValue)})${linkSuffix}`);
       }
       if (linkEntries.length) {
         lines.push('Raw mention-link keys:');
         for (const entry of linkEntries) {
           const suffix = /^\d+$/.test(entry.discordId) ? ` -> <@${entry.discordId}>` : '';
-          lines.push(`- \`${entry.key}\`${suffix}`);
+          lines.push(`- \`${utils.whatsapp.formatJidForDisplay(entry.key)}\`${suffix}`);
         }
       }
 
@@ -1653,6 +1658,25 @@ const commandHandlers = {
       const enabled = Boolean(ctx.getBooleanOption('enabled'));
       state.settings.WASenderPlatformSuffix = enabled;
       await ctx.reply(`WhatsApp sender platform suffix is set to ${state.settings.WASenderPlatformSuffix}.`);
+    },
+  },
+  hidephonenumbers: {
+    description: 'Hide WhatsApp phone numbers on Discord (use pseudonyms when needed).',
+    options: [
+      {
+        name: 'enabled',
+        description: 'Whether phone numbers should be hidden on Discord.',
+        type: ApplicationCommandOptionTypes.BOOLEAN,
+        required: true,
+      },
+    ],
+    async execute(ctx) {
+      const enabled = Boolean(ctx.getBooleanOption('enabled'));
+      state.settings.HidePhoneNumbers = enabled;
+      if (enabled) {
+        utils.whatsapp.ensurePrivacySalt();
+      }
+      await ctx.reply(`Hide phone numbers is set to ${state.settings.HidePhoneNumbers}.`);
     },
   },
   waupload: {

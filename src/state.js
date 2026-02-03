@@ -43,6 +43,8 @@ const state = {
     RollbackPromptMessage: null,
     PinDurationSeconds: 7 * 24 * 60 * 60,
     WhatsAppDiscordMentionLinks: {},
+    HidePhoneNumbers: false,
+    PrivacySalt: '',
   },
   dcClient: null,
   waClient: null,
