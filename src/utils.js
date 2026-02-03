@@ -18,6 +18,7 @@ import { Agent } from 'undici';
 
 import state from './state.js';
 import storage from './storage.js';
+import messageStore from './messageStore.js';
 
 const { Webhook, MessageAttachment, MessageActionRow, MessageButton, Constants: DiscordConstants } = discordJs;
 const { StickerFormatTypes } = DiscordConstants;
@@ -2954,9 +2955,39 @@ const whatsapp = {
 
     const [nMsgType, message] = this.getMessage({ message: qMsg }, qMsgType);
     const { content } = await this.getContent(message, nMsgType, qMsgType, { mentionTarget: 'name' });
+
+    const quoteParticipant = this.formatJid(context?.participant);
+    const quoteParticipantAlt = this.formatJid(context?.participantAlt);
+    const quoteNameFromParticipant = async () => {
+      const [primary, alternate] = await this.hydrateJidPair(quoteParticipant, quoteParticipantAlt);
+      const resolved = this.resolveKnownJid(primary, alternate, quoteParticipant, quoteParticipantAlt)
+        || primary
+        || alternate
+        || quoteParticipant
+        || quoteParticipantAlt
+        || '';
+      return this.jidToName(resolved);
+    };
+
+    const quoteNameFromStore = async () => {
+      if (!context?.stanzaId) return null;
+      const rawRemote = this.formatJid(rawMsg?.key?.remoteJid);
+      const rawRemoteAlt = this.formatJid(rawMsg?.key?.remoteJidAlt || rawMsg?.key?.participantAlt || rawMsg?.remoteJidAlt);
+      const [primary, alternate] = await this.hydrateJidPair(rawRemote, rawRemoteAlt);
+      const candidates = [...new Set([rawRemote, rawRemoteAlt, primary, alternate].filter(Boolean))];
+      for (const remoteJid of candidates) {
+        const stored = messageStore.get({ remoteJid, id: context.stanzaId });
+        if (stored) {
+          return this.getSenderName(stored);
+        }
+      }
+      return null;
+    };
+
+    const quoteName = await quoteNameFromStore() || await quoteNameFromParticipant();
     let file = null;
     if (qMsgType && context?.stanzaId) {
-      const quoteParticipant = this.formatJid(context?.participant || context?.participantAlt);
+      const quoteDownloadParticipant = this.formatJid(context?.participant || context?.participantAlt);
       if (context?.participant && context?.participantAlt) {
         this.migrateLegacyJid(context.participantAlt, context.participant);
       }
@@ -2965,7 +2996,7 @@ const whatsapp = {
           remoteJid: (await this.getChannelJid(rawMsg)) || rawMsg.key.remoteJid,
           id: context.stanzaId,
           fromMe: rawMsg.key.fromMe,
-          participant: quoteParticipant,
+          participant: quoteDownloadParticipant,
         },
         message: qMsg,
       };
@@ -2973,7 +3004,7 @@ const whatsapp = {
     }
 
     const quote = {
-      name: this.jidToName(this.resolveKnownJid(context?.participant, context?.participantAlt) || ''),
+      name: quoteName,
       content,
       file,
     };
