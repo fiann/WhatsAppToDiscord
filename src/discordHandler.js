@@ -24,6 +24,7 @@ const client = createDiscordClient({
     Intents.FLAGS.GUILDS,
     Intents.FLAGS.GUILD_MESSAGES,
     Intents.FLAGS.GUILD_MESSAGE_REACTIONS,
+    Intents.FLAGS.GUILD_MESSAGE_TYPING,
     Intents.FLAGS.MESSAGE_CONTENT,
   ],
 });
@@ -507,31 +508,90 @@ client.on('channelDelete', async (channel) => {
   }
 });
 
-const typingTimers = new Map();
+const WA_TYPING_IDLE_MS = 12_000;
+const WA_TYPING_REFRESH_MS = 8_000;
+const WA_TYPING_MIN_SEND_GAP_MS = 3_000;
+
+const typingPresenceSessions = new Map();
+
+const endTypingPresenceSession = (channelId) => {
+  const session = typingPresenceSessions.get(channelId);
+  if (!session) return;
+  typingPresenceSessions.delete(channelId);
+
+  if (session.idleTimer) clearTimeout(session.idleTimer);
+  if (session.refreshTimer) clearInterval(session.refreshTimer);
+
+  state.waClient?.sendPresenceUpdate?.('paused', session.jid).catch(() => {});
+};
+
+const maybeSendComposingPresence = (channelId) => {
+  const session = typingPresenceSessions.get(channelId);
+  if (!session || !session.jid) return;
+  if (!state.waClient?.sendPresenceUpdate) return;
+
+  const now = Date.now();
+  if (now - session.lastComposingSentAt < WA_TYPING_MIN_SEND_GAP_MS) return;
+  session.lastComposingSentAt = now;
+
+  state.waClient.sendPresenceUpdate('composing', session.jid).catch(() => {});
+};
+
+const noteDiscordTypingInChannel = (channelId, jid) => {
+  const now = Date.now();
+  let session = typingPresenceSessions.get(channelId);
+  if (!session) {
+    session = {
+      jid,
+      lastActivityAt: now,
+      lastComposingSentAt: 0,
+      idleTimer: null,
+      refreshTimer: null,
+    };
+    typingPresenceSessions.set(channelId, session);
+  } else {
+    session.jid = jid;
+    session.lastActivityAt = now;
+  }
+
+  maybeSendComposingPresence(channelId);
+
+  if (session.idleTimer) clearTimeout(session.idleTimer);
+  session.idleTimer = setTimeout(() => endTypingPresenceSession(channelId), WA_TYPING_IDLE_MS);
+  session.idleTimer?.unref?.();
+
+  if (session.refreshTimer) return;
+  session.refreshTimer = setInterval(() => {
+    const current = typingPresenceSessions.get(channelId);
+    if (!current) {
+      clearInterval(session.refreshTimer);
+      return;
+    }
+
+    const age = Date.now() - current.lastActivityAt;
+    if (age >= WA_TYPING_IDLE_MS) {
+      endTypingPresenceSession(channelId);
+      return;
+    }
+    if (Date.now() - current.lastComposingSentAt >= WA_TYPING_REFRESH_MS) {
+      maybeSendComposingPresence(channelId);
+    }
+  }, WA_TYPING_REFRESH_MS);
+  session.refreshTimer?.unref?.();
+};
 
 client.on('typingStart', async (typing) => {
+  if ((state.settings.oneWay >> 1 & 1) === 0) return;
+
+  const user = typing?.user;
+  if (user?.bot) return;
+  if (user?.id && client.user?.id && user.id === client.user.id) return;
+
   const channelId = typing?.channel?.id;
   const jid = channelId ? utils.discord.channelIdToJid(channelId) : null;
   if (!jid || !state.waClient?.sendPresenceUpdate) return;
 
-  const sendPausedLater = () => {
-    const existing = typingTimers.get(channelId);
-    if (existing) {
-      clearTimeout(existing);
-    }
-    const timer = setTimeout(() => {
-      typingTimers.delete(channelId);
-      state.waClient.sendPresenceUpdate('paused', jid).catch(() => {});
-    }, 5000);
-    typingTimers.set(channelId, timer);
-  };
-
-  try {
-    await state.waClient.sendPresenceUpdate('composing', jid);
-  } catch {
-    /* ignore */
-  }
-  sendPausedLater();
+  noteDiscordTypingInChannel(channelId, jid);
 });
 
 client.on('whatsappMessage', async (message) => {

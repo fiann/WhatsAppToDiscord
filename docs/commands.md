@@ -202,6 +202,9 @@ Usage: `/redirectbots enabled:<true|false>`
 Allow or block Discord webhook messages from being forwarded to WhatsApp.  
 Usage: `/redirectwebhooks enabled:<true|false>`
 
+### Typing indicators (automatic)
+When someone starts typing in a linked Discord channel, WA2DC sends WhatsApp presence updates (`composing` / `paused`) to the linked chat so your WhatsApp account shows “typing…”. This only runs when Discord → WhatsApp bridging is enabled (bidirectional or `/oneway direction:whatsapp`). WhatsApp cannot show *which* Discord user is typing—only that the bridge account is.
+
 ### `/publishing`
 Toggle automatic cross-posting for messages sent to Discord news channels.  
 Usage: `/publishing enabled:<true|false>`
