@@ -2814,14 +2814,48 @@ const whatsapp = {
     }
     return [...results];
   },
-  async applyDiscordMentionLinks(text, mentionDescriptors = [], { appendTrailing = false } = {}) {
+  async preferMentionJidForChat(mentionJid, chatJid) {
+    const formatted = this.formatJid(mentionJid);
+    if (!formatted) return null;
+
+    const wantsLid = typeof chatJid === 'string' && chatJid.endsWith('@g.us');
+    const store = state.waClient?.signalRepository?.lidMapping;
+
+    if (wantsLid) {
+      if (this.isLidJid(formatted)) return formatted;
+      if (this.isPhoneJid(formatted) && store && typeof store.getLIDForPN === 'function') {
+        try {
+          const lid = this.formatJid(await store.getLIDForPN(formatted));
+          if (lid) return lid;
+        } catch (err) {
+          state.logger?.debug?.({ err }, 'Failed to resolve LID JID for mention');
+        }
+      }
+      return formatted;
+    }
+
+    if (this.isPhoneJid(formatted)) return formatted;
+    if (this.isLidJid(formatted) && store && typeof store.getPNForLID === 'function') {
+      try {
+        const pn = this.formatJid(await store.getPNForLID(formatted));
+        if (pn) return pn;
+      } catch (err) {
+        state.logger?.debug?.({ err }, 'Failed to resolve PN JID for mention');
+      }
+    }
+    return formatted;
+  },
+  async applyDiscordMentionLinks(text, mentionDescriptors = [], { appendTrailing = false, chatJid = null } = {}) {
     if (!text) return { text, mentionJids: [] };
     if (!Array.isArray(mentionDescriptors) || mentionDescriptors.length === 0) {
       return { text, mentionJids: [] };
     }
 
     const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const buildMentionRegex = (token) => new RegExp(`@${escapeRegex(token)}(?=\\W|$)`, 'gi');
+    const buildMentionRegex = (token) => new RegExp(
+      `@${escapeRegex(token)}(?=$|\\s|[\\p{P}\\p{S}])`,
+      'giu',
+    );
 
     const mentionJids = new Set();
     let nextText = text;
@@ -2830,22 +2864,36 @@ const whatsapp = {
     for (const descriptor of mentionDescriptors) {
       const discordUserId = descriptor?.discordUserId;
       const displayTokens = Array.isArray(descriptor?.displayTokens) ? descriptor.displayTokens : [];
+      const rawTokens = Array.isArray(descriptor?.rawTokens) ? descriptor.rawTokens : [];
       if (!discordUserId) continue;
 
       const linked = this.getLinkedJidsForDiscordUserId(discordUserId);
       if (!linked.length) continue;
 
-      // Prefer a phone JID when available; otherwise try to hydrate LID->PN.
-      let mentionJid = linked.find((jid) => this.isPhoneJid(jid)) || linked[0];
-      const [primary, alternate] = await this.hydrateJidPair(mentionJid, null);
-      mentionJid = this.resolveKnownJid(primary, alternate) || primary || alternate || mentionJid;
+      const wantsLid = typeof chatJid === 'string' && chatJid.endsWith('@g.us');
+      const preferred = wantsLid
+        ? (linked.find((jid) => this.isLidJid(jid)) || linked[0])
+        : (linked.find((jid) => this.isPhoneJid(jid)) || linked[0]);
+
+      let mentionJid = await this.preferMentionJidForChat(preferred, chatJid);
       if (!mentionJid) continue;
 
-      const phoneToken = this.jidToPhone(mentionJid);
-      const replacementToken = phoneToken ? `@${phoneToken}` : `@${this.jidToName(mentionJid)}`;
+      const replacementToken = this.isPhoneJid(mentionJid)
+        ? `@${this.jidToPhone(mentionJid)}`
+        : `@${this.jidToName(mentionJid)}`;
 
       let replaced = false;
       const candidates = [...new Set(displayTokens.map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean))];
+
+      const rawCandidates = [...new Set(rawTokens.map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean))];
+      for (const token of rawCandidates) {
+        const regex = new RegExp(escapeRegex(token), 'g');
+        const updated = nextText.replace(regex, replacementToken);
+        if (updated === nextText) continue;
+        nextText = updated;
+        replaced = true;
+      }
+
       for (const token of candidates) {
         const regex = buildMentionRegex(token);
         const updated = nextText.replace(regex, replacementToken);

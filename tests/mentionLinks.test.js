@@ -271,3 +271,41 @@ test('Outgoing mention parsing supports phone-number tokens', async () => {
     restoreObject(state.contacts, originalContacts);
   }
 });
+
+test('Discord mentions prefer LID JIDs in WhatsApp groups when available', async () => {
+  const originalWaClient = state.waClient;
+  const originalContacts = snapshotObject(state.contacts);
+  const originalLinks = snapshotObject(state.settings.WhatsAppDiscordMentionLinks);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = {
+      contacts: state.contacts,
+      user: { id: '0@s.whatsapp.net' },
+      signalRepository: { lidMapping: {} },
+    };
+
+    const pnJid = '14155550123@s.whatsapp.net';
+    const lidJid = '161040050426060@lid';
+    const discordUserId = '123456789012345678';
+    state.contacts[pnJid] = 'Alice';
+    state.contacts[lidJid] = 'Alice';
+    state.settings.WhatsAppDiscordMentionLinks = { [pnJid]: discordUserId, [lidJid]: discordUserId };
+
+    const input = 'Hi <@123456789012345678>';
+    const result = await utils.whatsapp.applyDiscordMentionLinks(input, [
+      {
+        discordUserId,
+        rawTokens: ['<@123456789012345678>', '<@!123456789012345678>'],
+        displayTokens: ['Alice'],
+      },
+    ], { chatJid: '123456789@g.us' });
+
+    assert.equal(result.text, 'Hi @Alice');
+    assert.deepEqual(result.mentionJids, [lidJid]);
+  } finally {
+    state.waClient = originalWaClient;
+    restoreObject(state.contacts, originalContacts);
+    state.settings.WhatsAppDiscordMentionLinks = originalLinks;
+  }
+});
