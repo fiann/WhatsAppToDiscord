@@ -45,13 +45,7 @@ The bot is built publicly on [GitHub actions](https://github.com/arespawn/WhatsA
 1. Execute the following commands to clone and enter bot's folder:
     1. `git clone https://github.com/arespawn/WhatsAppToDiscord.git`
     1. `cd WhatsAppToDiscord` 
-1. Run `npm i` to install dependencies
-1. Run `./node_modules/.bin/esbuild ./src/runner.js --bundle --platform=node --format=cjs --external:sharp --external:qrcode-terminal --external:link-preview-js --target=node20 --outfile=out.cjs` to create a single JS file
-1. Run one of the following commands based on your platform:
-    - For x64 Linux: `./node_modules/.bin/pkg out.cjs -t latest-linux-x64 --options no-warnings -o build/WA2DC-Linux`
-    - For x64 MacOS: `./node_modules/.bin/pkg out.cjs -t latest-macos-x64 --options no-warnings -o build/WA2DC-macOS`
-    - For x64 Windows: `./node_modules/.bin/pkg out.cjs -t latest-win-x64 --options no-warnings -o build/WA2DC`
-    - For ARM Linux `./node_modules/.bin/pkg out.cjs -t latest-linux-arm64 --options no-warnings -o build/WA2DC-Linux-arm64`
-    - For ARM MacOS `./node_modules/.bin/pkg out.cjs -t latest-macos-arm64 --options no-warnings -o build/WA2DC-macOS-arm64`
-    - For ARM Windows: `./node_modules/.bin/pkg out.cjs -t latest-win-arm64 --options no-warnings -o build/WA2DC-arm64`
+1. Run `npm ci` to install dependencies
+1. Run `npm run build:bin` to bundle + package for your current OS/CPU (output goes to `build/`)
+    - Optional smoke test: `npm run build:bin:smoke`
 1. That's it. You will have your executable in the `build` folder.

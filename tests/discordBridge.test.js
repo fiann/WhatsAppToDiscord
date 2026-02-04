@@ -197,6 +197,89 @@ test('oneWay gating blocks WhatsApp -> Discord forwards in discordHandler', asyn
   }
 });
 
+test('WhatsApp sender platform suffix appends to mirrored Discord messages', async () => {
+  const originalDiscordUtils = {
+    getGuild: utils.discord.getGuild,
+    getControlChannel: utils.discord.getControlChannel,
+    getOrCreateChannel: utils.discord.getOrCreateChannel,
+    safeWebhookSend: utils.discord.safeWebhookSend,
+  };
+  const originalSettings = {
+    Token: state.settings.Token,
+    GuildID: state.settings.GuildID,
+    oneWay: state.settings.oneWay,
+    WASenderPlatformSuffix: state.settings.WASenderPlatformSuffix,
+  };
+  const originalLastMessages = state.lastMessages;
+  const originalDcClient = state.dcClient;
+
+  try {
+    state.settings.Token = 'TEST_TOKEN';
+    state.settings.GuildID = 'guild';
+    state.settings.oneWay = 0b11;
+    state.settings.WASenderPlatformSuffix = true;
+    state.lastMessages = {};
+
+    utils.discord.getGuild = async () => ({ commands: { set: async () => {} } });
+    utils.discord.getControlChannel = async () => ({ send: async () => {} });
+    utils.discord.getOrCreateChannel = async () => ({ id: 'hook-1', token: 'token', channel: { type: 'GUILD_TEXT' } });
+
+    const sent = [];
+    utils.discord.safeWebhookSend = async (_webhook, args) => {
+      sent.push(args);
+      return { id: `dc-${sent.length}`, channel: { type: 'GUILD_TEXT' } };
+    };
+
+    class FakeDiscordClient extends EventEmitter {
+      constructor() {
+        super();
+        this.user = { id: 'bot-1' };
+      }
+
+      async login() {
+        queueMicrotask(() => this.emit('ready'));
+        return this;
+      }
+    }
+
+    const fakeClient = new FakeDiscordClient();
+    setClientFactoryOverrides({ createDiscordClient: () => fakeClient });
+    const discordHandler = await importDiscordHandler('wa-platform-suffix');
+    state.dcClient = await discordHandler.start();
+
+    fakeClient.emit('whatsappMessage', {
+      id: 'a'.repeat(21), // Baileys getDevice() predicts this as Android.
+      name: 'Tester',
+      content: 'hello',
+      channelJid: 'jid@s.whatsapp.net',
+      file: null,
+      quote: null,
+      profilePic: null,
+      isGroup: false,
+      isForwarded: false,
+      isEdit: false,
+    });
+    await delay(0);
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.content, 'hello\n\n*(Android)*');
+  } finally {
+    utils.discord.getGuild = originalDiscordUtils.getGuild;
+    utils.discord.getControlChannel = originalDiscordUtils.getControlChannel;
+    utils.discord.getOrCreateChannel = originalDiscordUtils.getOrCreateChannel;
+    utils.discord.safeWebhookSend = originalDiscordUtils.safeWebhookSend;
+
+    state.settings.Token = originalSettings.Token;
+    state.settings.GuildID = originalSettings.GuildID;
+    state.settings.oneWay = originalSettings.oneWay;
+    state.settings.WASenderPlatformSuffix = originalSettings.WASenderPlatformSuffix;
+
+    state.lastMessages = originalLastMessages;
+    state.dcClient = originalDcClient;
+    resetClientFactoryOverrides();
+  }
+});
+
 test('Discord messageDelete emits discordDelete for bridged messages', async () => {
   const originalDiscordUtils = {
     getGuild: utils.discord.getGuild,

@@ -18,6 +18,7 @@ import { Agent } from 'undici';
 
 import state from './state.js';
 import storage from './storage.js';
+import messageStore from './messageStore.js';
 
 const { Webhook, MessageAttachment, MessageActionRow, MessageButton, Constants: DiscordConstants } = discordJs;
 const { StickerFormatTypes } = DiscordConstants;
@@ -63,6 +64,7 @@ const LINK_PREVIEW_FETCH_TIMEOUT_MS = 3000;
 const LINK_PREVIEW_MAX_REDIRECTS = 5;
 const LINK_PREVIEW_FETCH_OPTS = { timeout: LINK_PREVIEW_FETCH_TIMEOUT_MS };
 const LINK_PREVIEW_MAX_BYTES = 1024 * 1024; // 1 MiB
+const LINK_PREVIEW_THUMB_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB
 const EXPLICIT_URL_REGEX = /<?https?:\/\/[^\s>]+>?/i;
 const BARE_URL_REGEX = /(?:^|[\s<])((?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=+#]*)?)/i;
 const TRAILING_PUNCTUATION_REGEX = /[)\],.;!?]+$/;
@@ -110,6 +112,25 @@ const ensureDownloadServerSecret = () => {
   if (existing) return existing;
   const secret = crypto.randomBytes(32).toString('base64url');
   state.settings.LocalDownloadServerSecret = secret;
+  storage.saveSettings?.().catch(() => {});
+  return Buffer.from(secret, 'base64url');
+};
+
+const getPrivacySaltKey = () => {
+  const secret = state.settings?.PrivacySalt;
+  if (typeof secret !== 'string' || !secret) return null;
+  try {
+    return Buffer.from(secret, 'base64url');
+  } catch {
+    return null;
+  }
+};
+
+const ensurePrivacySaltKey = () => {
+  const existing = getPrivacySaltKey();
+  if (existing) return existing;
+  const secret = crypto.randomBytes(32).toString('base64url');
+  state.settings.PrivacySalt = secret;
   storage.saveSettings?.().catch(() => {});
   return Buffer.from(secret, 'base64url');
 };
@@ -435,6 +456,72 @@ const fetchPreviewResponse = async (url, { maxBytes = LINK_PREVIEW_MAX_BYTES } =
   }
 };
 
+const fetchPreviewBuffer = async (url, {
+  maxBytes = LINK_PREVIEW_THUMB_MAX_BYTES,
+  accept = 'image/*,*/*;q=0.8',
+} = {}) => {
+  let currentUrl = url;
+  let redirects = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    validatePreviewTargetUrl(currentUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LINK_PREVIEW_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(currentUrl, {
+        dispatcher: linkPreviewDispatcher,
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: {
+          'user-agent': 'WA2DC-LinkPreview',
+          accept,
+        },
+      });
+
+      const status = Number(response.status) || 0;
+      if (status >= 300 && status < 400) {
+        const locationHeader = response.headers.get('location') || '';
+        if (!locationHeader) {
+          throw new Error('Redirect without location');
+        }
+        if (redirects >= LINK_PREVIEW_MAX_REDIRECTS) {
+          throw new Error('Too many redirects');
+        }
+        currentUrl = new URL(locationHeader, currentUrl).toString();
+        redirects += 1;
+        continue;
+      }
+
+      if (status < 200 || status >= 300) {
+        throw new Error(`Unexpected status ${status}`);
+      }
+
+      const headers = {};
+      response.headers.forEach((value, key) => {
+        headers[String(key).toLowerCase()] = value;
+      });
+
+      const contentLength = Number(headers['content-length']);
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        const err = new Error('Response too large');
+        err.code = 'WA2DC_PREVIEW_TOO_LARGE';
+        throw err;
+      }
+
+      const buffer = await readBodyWithLimit(response.body, maxBytes);
+      return { url: currentUrl, headers, buffer };
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+        throw new Error('Request timeout');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
+
 const sanitizeFileName = (name = '', fallback = 'file') => {
   const normalized = name.replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').slice(0, 64);
   return normalized || fallback;
@@ -589,7 +676,23 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
     return {};
   }
   try {
-    const { imageMessage } = await prepareWAMessageMedia({ image: { url: imageUrl } }, {
+    const { buffer } = await fetchPreviewBuffer(imageUrl, { maxBytes: LINK_PREVIEW_THUMB_MAX_BYTES, accept: 'image/*,*/*;q=0.8' });
+
+    let jpegThumbnail;
+    try {
+      const jimp = await import('jimp');
+      if (typeof jimp?.Jimp?.read === 'function') {
+        const img = await jimp.Jimp.read(buffer);
+        const width = 192;
+        jpegThumbnail = await img
+          .resize({ w: width, mode: jimp.ResizeStrategy.BILINEAR })
+          .getBuffer('image/jpeg', { quality: 50 });
+      }
+    } catch (err) {
+      state.logger?.debug?.({ err }, 'Failed to generate link preview jpegThumbnail');
+    }
+
+    const { imageMessage } = await prepareWAMessageMedia({ image: buffer }, {
       upload: uploadImage,
       mediaTypeOverride: 'thumbnail-link',
       options: fetchOpts,
@@ -597,7 +700,9 @@ const buildHighQualityThumbnail = async (imageUrl, uploadImage, fetchOpts = {}) 
     if (!imageMessage) {
       return {};
     }
-    const jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
+    if (!jpegThumbnail && imageMessage.jpegThumbnail) {
+      jpegThumbnail = Buffer.from(imageMessage.jpegThumbnail);
+    }
     return {
       jpegThumbnail,
       highQualityThumbnail: imageMessage,
@@ -660,7 +765,7 @@ const buildLinkPreviewInfo = async (text, { uploadImage, logger } = {}) => {
   });
   if (firstImage) {
     urlInfo.originalThumbnailUrl = firstImage;
-    if (!process.pkg && typeof uploadImage === 'function') {
+    if (typeof uploadImage === 'function') {
       const { jpegThumbnail, highQualityThumbnail } = await buildHighQualityThumbnail(firstImage, uploadImage, LINK_PREVIEW_FETCH_OPTS);
       if (jpegThumbnail) {
         urlInfo.jpegThumbnail = jpegThumbnail;
@@ -1637,7 +1742,7 @@ const discord = {
     }
 
     this._unfinishedGoccCalls++;
-    const name = whatsapp.jidToName(normalizedJid);
+    const name = whatsapp.jidToChannelName(normalizedJid);
     const channel = await this.createChannel(name).catch((err) => {
       if (err.code === 50035) {
         return this.createChannel('invalid-name');
@@ -2445,18 +2550,85 @@ const whatsapp = {
     if (!jid) return '';
     return String(jid).split(':')[0].split('@')[0];
   },
+  ensurePrivacySalt() {
+    return ensurePrivacySaltKey();
+  },
+  isPhoneLike(value) {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (/[a-z]/i.test(trimmed)) return false;
+    const digits = trimmed.replace(/\D/g, '');
+    return digits.length >= 7 && digits.length <= 15;
+  },
+  privacyTagForJid(jid) {
+    const key = ensurePrivacySaltKey();
+    const normalized = this.formatJid(jid) || String(jid || '');
+    if (!normalized) return 'unknown';
+    const digest = crypto.createHmac('sha256', key)
+      .update(normalized, 'utf8')
+      .digest('base64url');
+    return digest.slice(0, 10);
+  },
+  anonymousName(jid) {
+    const tag = this.privacyTagForJid(jid);
+    return `WA User ${tag}`;
+  },
+  anonymousChannelName(jid) {
+    const normalized = this.formatJid(jid) || String(jid || '');
+    const tag = this.privacyTagForJid(normalized);
+    if (normalized === 'status@broadcast') return 'status';
+    if (typeof normalized === 'string' && normalized.endsWith('@g.us')) return `wa-group-${tag}`;
+    return `wa-user-${tag}`;
+  },
+  formatJidForDisplay(jid) {
+    const formatted = this.formatJid(jid) || String(jid || '');
+    if (!formatted) return '';
+    if (!state.settings?.HidePhoneNumbers) return formatted;
+    if (!this.isPhoneJid(formatted)) return formatted;
+    return `pn:redacted:${this.privacyTagForJid(formatted)}`;
+  },
   formatJid(jid) {
     if (!jid) return null;
     const [userPart, serverPart] = String(jid).split('@');
     if (!serverPart) return String(jid);
     const cleanUser = userPart.split(':')[0];
-    return `${cleanUser}@${serverPart}`;
+    const normalizedUser = (() => {
+      const server = String(serverPart).trim();
+      if (server !== 's.whatsapp.net' && server !== 'lid') return cleanUser;
+      const digitsOnly = String(cleanUser).replace(/\D/g, '');
+      return digitsOnly || cleanUser;
+    })();
+    return `${normalizedUser}@${serverPart}`;
   },
   isPhoneJid(jid = '') {
     return typeof jid === 'string' && jid.endsWith('@s.whatsapp.net');
   },
   isLidJid(jid = '') {
     return typeof jid === 'string' && jid.endsWith('@lid');
+  },
+  normalizeMentionLinks() {
+    const links = state.settings?.WhatsAppDiscordMentionLinks;
+    if (!links || typeof links !== 'object' || Array.isArray(links)) return false;
+
+    let changed = false;
+    for (const [jidRaw, discordId] of Object.entries({ ...links })) {
+      const normalized = this.formatJid(jidRaw);
+      if (!normalized || normalized === jidRaw) continue;
+
+      if (!Object.prototype.hasOwnProperty.call(links, normalized)) {
+        links[normalized] = discordId;
+      } else if (links[normalized] !== discordId) {
+        state.logger?.warn?.(
+          { from: jidRaw, to: normalized },
+          'Conflicting mention link keys; keeping normalized entry',
+        );
+      }
+
+      delete links[jidRaw];
+      changed = true;
+    }
+    return changed;
   },
   migrateLegacyJid(oldJid, newJid) {
     const legacy = this.formatJid(oldJid);
@@ -2472,6 +2644,7 @@ const whatsapp = {
     migrateKey(state.chats);
     migrateKey(state.contacts);
     migrateKey(state.goccRuns);
+    migrateKey(state.settings?.WhatsAppDiscordMentionLinks);
     const whitelist = state.settings?.Whitelist;
     if (Array.isArray(whitelist) && whitelist.length) {
       const normalized = whitelist.map((jid) => {
@@ -2517,33 +2690,76 @@ const whatsapp = {
     return jid.startsWith(this.jidToPhone(myJID)) && !jid.endsWith('@g.us');
   },
   jidToName(jid, pushName) {
-    if (this.isMe(state.waClient.user.id, jid)) { return 'You'; }
-    const contactName = state.waClient.contacts[this.formatJid(jid)];
-    const candidates = [contactName, pushName, this.jidToPhone(jid)];
+    const formatted = this.formatJid(jid) || String(jid || '');
+    const myJid = state.waClient?.user?.id;
+    if (myJid && formatted && this.isMe(myJid, formatted)) { return 'You'; }
+    const contactName = (formatted && (state.waClient?.contacts?.[formatted] ?? state.contacts?.[formatted])) || null;
+    const hidePhones = Boolean(state.settings?.HidePhoneNumbers);
+    const candidates = [contactName, pushName];
     for (const candidate of candidates) {
       if (typeof candidate !== 'string') continue;
       const trimmed = candidate.trim();
-      if (trimmed) return trimmed;
+      if (!trimmed) continue;
+      if (hidePhones && this.isPhoneLike(trimmed)) continue;
+      return trimmed;
     }
-    return 'Unknown';
+    if (!hidePhones) {
+      const fallback = this.jidToPhone(formatted);
+      return fallback ? fallback : 'Unknown';
+    }
+    return formatted ? this.anonymousName(formatted) : 'Unknown';
   },
   toJid(name) {
     if (!name) return null;
     const trimmed = String(name).trim();
+    const isPhoneLike = /^\+?[\d\s().-]+$/.test(trimmed);
+    if (isPhoneLike) {
+      const digits = trimmed.replace(/\D/g, '');
+      if (digits) return this.formatJid(`${digits}@s.whatsapp.net`);
+    }
     // eslint-disable-next-line no-restricted-globals
     if (!isNaN(trimmed)) { return this.formatJid(`${trimmed}@s.whatsapp.net`); }
     if (trimmed.includes('@')) {
       return this.formatJid(trimmed);
     }
+    if (state.settings?.HidePhoneNumbers) {
+      const match = trimmed.match(/^wa-(?:user|group)-([a-z0-9_-]{6,})$/i)
+        || trimmed.match(/^wa\s+(?:user|group)\s+([a-z0-9_-]{6,})$/i);
+      const tag = match?.[1];
+      if (tag) {
+        const jidCandidates = new Set([
+          ...Object.keys(state.waClient?.contacts || {}),
+          ...Object.keys(state.contacts || {}),
+          ...Object.keys(state.chats || {}),
+        ]);
+        for (const jidCandidate of jidCandidates) {
+          if (!jidCandidate) continue;
+          if (this.privacyTagForJid(jidCandidate) === tag) {
+            return this.formatJid(jidCandidate);
+          }
+        }
+      }
+    }
     const normalized = trimmed.toLowerCase();
-    const matches = Object.keys(state.waClient.contacts)
-      .filter((key) => state.waClient.contacts[key]
-        && state.waClient.contacts[key].toLowerCase().trim() === normalized);
+    const contactStore = state.waClient?.contacts || state.contacts || {};
+    const matches = Object.keys(contactStore)
+      .filter((key) => contactStore[key]
+        && contactStore[key].toLowerCase().trim() === normalized);
     const preferred = matches.find((jid) => this.isPhoneJid(jid)) || matches[0];
     return this.formatJid(preferred);
   },
+  jidToChannelName(jid, pushName) {
+    const hidePhones = Boolean(state.settings?.HidePhoneNumbers);
+    if (!hidePhones) return this.jidToName(jid, pushName);
+    const formatted = this.formatJid(jid) || String(jid || '');
+    const name = this.jidToName(formatted, pushName);
+    if (!name || name === 'Unknown') return this.anonymousChannelName(formatted);
+    if (formatted && name === this.anonymousName(formatted)) return this.anonymousChannelName(formatted);
+    if (this.isPhoneLike(name)) return this.anonymousChannelName(formatted);
+    return name;
+  },
   contacts() {
-    return Object.values(state.waClient.contacts);
+    return Object.values(state.waClient?.contacts || {});
   },
   convertDiscordFormatting(text = '') {
     if (!text) return text;
@@ -2556,18 +2772,130 @@ const whatsapp = {
     return converted;
   },
   getMentionedJids(text) {
-    const mentions = [];
-    if (!text) return mentions;
-    
-    const lower = text.replace(/<@!?\d+>/g, '').toLowerCase();
+    const mentions = new Set();
+    if (!text) return [];
 
-    for (const [jid, name] of Object.entries(state.contacts)) {
+    const cleaned = text.replace(/<@!?\d+>/g, '');
+    const lower = cleaned.toLowerCase();
+    const contactStore = state.waClient?.contacts || state.contacts || {};
+
+    for (const [jid, name] of Object.entries(contactStore)) {
       if (!name) continue;
-      if (lower.includes(`@${name.toLowerCase()}`)) {
-        mentions.push(jid);
+      if (lower.includes(`@${String(name).toLowerCase()}`)) {
+        const formatted = this.formatJid(jid);
+        if (formatted) mentions.add(formatted);
       }
     }
-    return mentions;
+
+    // Support phone-number tokens like "@14155550123" (or "@+14155550123").
+    const phoneMentionRegex = /@(\+?\d{7,15})(?=\W|$)/g;
+    let match;
+    while ((match = phoneMentionRegex.exec(cleaned)) !== null) {
+      const digits = String(match[1] || '').replace(/\D/g, '');
+      if (!digits) continue;
+      const jid = this.formatJid(`${digits}@s.whatsapp.net`);
+      if (jid) mentions.add(jid);
+    }
+
+    return [...mentions];
+  },
+  getLinkedJidsForDiscordUserId(discordUserId) {
+    const links = state.settings?.WhatsAppDiscordMentionLinks;
+    if (!links || typeof links !== 'object' || Array.isArray(links)) return [];
+    const normalizedId = typeof discordUserId === 'string' ? discordUserId.trim() : String(discordUserId || '').trim();
+    if (!/^\d+$/.test(normalizedId)) return [];
+
+    const results = new Set();
+    for (const [jidRaw, discordIdRaw] of Object.entries(links)) {
+      const storedId = typeof discordIdRaw === 'string' ? discordIdRaw.trim() : '';
+      if (storedId !== normalizedId) continue;
+      const formatted = this.formatJid(jidRaw);
+      if (formatted) results.add(formatted);
+    }
+    return [...results];
+  },
+  async preferMentionJidForChat(mentionJid) {
+    const formatted = this.formatJid(mentionJid);
+    if (!formatted) return null;
+
+    const store = state.waClient?.signalRepository?.lidMapping;
+
+    // Outgoing mentions: prefer PN JIDs where possible (most compatible).
+    if (this.isPhoneJid(formatted)) return formatted;
+    if (this.isLidJid(formatted) && store && typeof store.getPNForLID === 'function') {
+      try {
+        const pn = this.formatJid(await store.getPNForLID(formatted));
+        if (pn) return pn;
+      } catch (err) {
+        state.logger?.debug?.({ err }, 'Failed to resolve PN JID for mention');
+      }
+    }
+    return formatted;
+  },
+  async applyDiscordMentionLinks(text, mentionDescriptors = [], { appendTrailing = false, chatJid = null } = {}) {
+    if (!text) return { text, mentionJids: [] };
+    if (!Array.isArray(mentionDescriptors) || mentionDescriptors.length === 0) {
+      return { text, mentionJids: [] };
+    }
+
+    const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const buildMentionRegex = (token) => new RegExp(
+      `@${escapeRegex(token)}(?=$|\\s|[\\p{P}\\p{S}])`,
+      'giu',
+    );
+
+    const mentionJids = new Set();
+    let nextText = text;
+    const appended = new Set();
+
+    for (const descriptor of mentionDescriptors) {
+      const discordUserId = descriptor?.discordUserId;
+      const displayTokens = Array.isArray(descriptor?.displayTokens) ? descriptor.displayTokens : [];
+      const rawTokens = Array.isArray(descriptor?.rawTokens) ? descriptor.rawTokens : [];
+      if (!discordUserId) continue;
+
+      const linked = this.getLinkedJidsForDiscordUserId(discordUserId);
+      if (!linked.length) continue;
+
+      const preferred = linked.find((jid) => this.isPhoneJid(jid)) || linked[0];
+
+      let mentionJid = await this.preferMentionJidForChat(preferred, chatJid);
+      if (!mentionJid) continue;
+
+      const replacementToken = this.isPhoneJid(mentionJid)
+        ? `@${this.jidToPhone(mentionJid)}`
+        : `@${this.jidToName(mentionJid)}`;
+
+      let replaced = false;
+      const candidates = [...new Set(displayTokens.map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean))];
+
+      const rawCandidates = [...new Set(rawTokens.map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean))];
+      for (const token of rawCandidates) {
+        const regex = new RegExp(escapeRegex(token), 'g');
+        const updated = nextText.replace(regex, replacementToken);
+        if (updated === nextText) continue;
+        nextText = updated;
+        replaced = true;
+      }
+
+      for (const token of candidates) {
+        const regex = buildMentionRegex(token);
+        const updated = nextText.replace(regex, replacementToken);
+        if (updated === nextText) continue;
+        nextText = updated;
+        replaced = true;
+      }
+
+      if (replaced) {
+        mentionJids.add(mentionJid);
+      } else if (appendTrailing && !appended.has(mentionJid)) {
+        nextText = nextText ? `${nextText} ${replacementToken}` : replacementToken;
+        appended.add(mentionJid);
+        mentionJids.add(mentionJid);
+      }
+    }
+
+    return { text: nextText, mentionJids: [...mentionJids] };
   },
   async sendQR(qrString) {
     await (await discord.getControlChannel())
@@ -2658,10 +2986,40 @@ const whatsapp = {
     const qMsgType = this.getMessageType({ message: qMsg });
 
     const [nMsgType, message] = this.getMessage({ message: qMsg }, qMsgType);
-    const content = this.getContent(message, nMsgType, qMsgType);
+    const { content } = await this.getContent(message, nMsgType, qMsgType, { mentionTarget: 'name' });
+
+    const quoteParticipant = this.formatJid(context?.participant);
+    const quoteParticipantAlt = this.formatJid(context?.participantAlt);
+    const quoteNameFromParticipant = async () => {
+      const [primary, alternate] = await this.hydrateJidPair(quoteParticipant, quoteParticipantAlt);
+      const resolved = this.resolveKnownJid(primary, alternate, quoteParticipant, quoteParticipantAlt)
+        || primary
+        || alternate
+        || quoteParticipant
+        || quoteParticipantAlt
+        || '';
+      return this.jidToName(resolved);
+    };
+
+    const quoteNameFromStore = async () => {
+      if (!context?.stanzaId) return null;
+      const rawRemote = this.formatJid(rawMsg?.key?.remoteJid);
+      const rawRemoteAlt = this.formatJid(rawMsg?.key?.remoteJidAlt || rawMsg?.key?.participantAlt || rawMsg?.remoteJidAlt);
+      const [primary, alternate] = await this.hydrateJidPair(rawRemote, rawRemoteAlt);
+      const candidates = [...new Set([rawRemote, rawRemoteAlt, primary, alternate].filter(Boolean))];
+      for (const remoteJid of candidates) {
+        const stored = messageStore.get({ remoteJid, id: context.stanzaId });
+        if (stored) {
+          return this.getSenderName(stored);
+        }
+      }
+      return null;
+    };
+
+    const quoteName = await quoteNameFromStore() || await quoteNameFromParticipant();
     let file = null;
     if (qMsgType && context?.stanzaId) {
-      const quoteParticipant = this.formatJid(context?.participant || context?.participantAlt);
+      const quoteDownloadParticipant = this.formatJid(context?.participant || context?.participantAlt);
       if (context?.participant && context?.participantAlt) {
         this.migrateLegacyJid(context.participantAlt, context.participant);
       }
@@ -2670,7 +3028,7 @@ const whatsapp = {
           remoteJid: (await this.getChannelJid(rawMsg)) || rawMsg.key.remoteJid,
           id: context.stanzaId,
           fromMe: rawMsg.key.fromMe,
-          participant: quoteParticipant,
+          participant: quoteDownloadParticipant,
         },
         message: qMsg,
       };
@@ -2678,7 +3036,7 @@ const whatsapp = {
     }
 
     const quote = {
-      name: this.jidToName(this.resolveKnownJid(context?.participant, context?.participantAlt) || ''),
+      name: quoteName,
       content,
       file,
     };
@@ -2804,13 +3162,14 @@ const whatsapp = {
       || rawMsg?.key?.id
       || rawMsg?.id;
   },
-  getContent(msg, nMsgType, msgType) {
+  async getContent(msg, nMsgType, msgType, { mentionTarget = 'name' } = {}) {
     let content = '';
+    const discordMentions = new Set();
     if (msgType === 'viewOnceMessageV2') {
       content += 'View once message:\n';
     }
     if (msg == null) {
-      return content;
+      return { content, discordMentions: [] };
     }
     switch (nMsgType) {
       case 'conversation':
@@ -2849,12 +3208,164 @@ const whatsapp = {
     }
     const contextInfo = typeof msg === 'object' && msg !== null ? msg.contextInfo : undefined;
     const mentions = contextInfo?.mentionedJid || [];
+    const links = state.settings?.WhatsAppDiscordMentionLinks;
+    const hasLinks = links && typeof links === 'object';
+
+    const normalizeDiscordUserId = (value) => {
+      if (typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      return /^\d+$/.test(trimmed) ? trimmed : null;
+    };
+
+    const resolveLinkedDiscordUserId = async (jid) => {
+      if (!hasLinks) return null;
+      const formatted = this.formatJid(jid);
+      if (!formatted) return null;
+
+      const normalizeNameForMatch = (value) => {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        return trimmed
+          .normalize('NFKC')
+          .toLowerCase()
+          .replace(/\s+/g, ' ');
+      };
+
+      const getStoredContactName = (candidateJid) => {
+        const normalized = this.formatJid(candidateJid);
+        if (!normalized) return null;
+        const stored = state.contacts?.[normalized] || state.waClient?.contacts?.[normalized];
+        const normalizedName = normalizeNameForMatch(stored);
+        if (!normalizedName) return null;
+        if (normalizedName === 'unknown' || normalizedName === 'you') return null;
+        if (/^\d+$/.test(normalizedName)) return null;
+        return normalizedName;
+      };
+
+      const lookup = (candidate) => {
+        if (!candidate) return null;
+        return normalizeDiscordUserId(links[candidate]);
+      };
+
+      const lookupCandidates = (candidate) => {
+        const normalized = this.formatJid(candidate);
+        if (!normalized) return [];
+        const [userPart, serverPart] = normalized.split('@');
+        const candidates = [normalized];
+        if ((serverPart === 's.whatsapp.net' || serverPart === 'lid') && /^\d+$/.test(userPart)) {
+          candidates.push(`+${userPart}@${serverPart}`);
+        }
+        return [...new Set(candidates)];
+      };
+
+      const tryLookup = (candidate) => {
+        for (const key of lookupCandidates(candidate)) {
+          const found = lookup(key);
+          if (found) return { discordUserId: found, keys: lookupCandidates(candidate) };
+        }
+        return null;
+      };
+
+      const direct = tryLookup(formatted);
+      if (direct) return { discordUserId: direct.discordUserId, jids: [formatted, ...direct.keys] };
+
+      const [primary, alternate] = await this.hydrateJidPair(formatted, null);
+      const resolved = this.resolveKnownJid(primary, alternate);
+      const resolvedCandidate = resolved || primary || alternate;
+      const found = tryLookup(resolvedCandidate) || tryLookup(primary) || tryLookup(alternate);
+      const jids = [formatted, primary, alternate, resolved].filter(Boolean);
+      if (found) return { discordUserId: found.discordUserId, jids: [...jids, ...found.keys] };
+
+      // Fallback: if WhatsApp provides LID JIDs but the PN<->LID mapping store
+      // can't resolve it, try matching based on the stored contact name.
+      const mentionName = getStoredContactName(formatted)
+        || getStoredContactName(resolvedCandidate)
+        || getStoredContactName(primary)
+        || getStoredContactName(alternate);
+      if (!mentionName) return null;
+
+      const matchingKeys = [];
+      const candidateDiscordIds = new Set();
+      for (const [linkJid, discordIdRaw] of Object.entries(links)) {
+        const discordUserId = normalizeDiscordUserId(discordIdRaw);
+        if (!discordUserId) continue;
+        const linkName = getStoredContactName(linkJid);
+        if (!linkName) continue;
+        if (linkName !== mentionName) continue;
+        matchingKeys.push(linkJid);
+        candidateDiscordIds.add(discordUserId);
+      }
+      if (candidateDiscordIds.size !== 1) return null;
+
+      return {
+        discordUserId: [...candidateDiscordIds][0],
+        jids: [...new Set([...jids, ...matchingKeys].filter(Boolean))],
+      };
+    };
+
+    const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const buildMentionRegex = (token) => new RegExp(`@${escapeRegex(token)}(?=\\W|$)`, 'g');
+    const trailingMentions = new Set();
+
     for (const jid of mentions) {
-      const name = this.jidToName(jid);
-      const regex = new RegExp(`@${this.jidToPhone(jid)}\\b`, 'g');
-      content = content.replace(regex, `@${name}`);
+      const formattedMentionJid = this.formatJid(jid);
+      if (!formattedMentionJid) continue;
+
+      let replacement = `@${this.jidToName(formattedMentionJid)}`;
+      let tokens = [formattedMentionJid];
+      let nameToken = this.jidToName(formattedMentionJid);
+      let shouldAppendIfNotFound = false;
+
+      if (mentionTarget === 'discord') {
+        const linked = await resolveLinkedDiscordUserId(formattedMentionJid);
+        if (linked?.discordUserId) {
+          discordMentions.add(linked.discordUserId);
+          replacement = `<@${linked.discordUserId}>`;
+          tokens = linked.jids;
+          nameToken = this.jidToName(this.resolveKnownJid(...linked.jids) || formattedMentionJid);
+          shouldAppendIfNotFound = true;
+        } else {
+          const [primary, alternate] = await this.hydrateJidPair(formattedMentionJid, null);
+          const resolved = this.resolveKnownJid(primary, alternate) || primary || alternate || formattedMentionJid;
+          replacement = `@${this.jidToName(resolved)}`;
+          tokens = [formattedMentionJid, primary, alternate, resolved].filter(Boolean);
+          nameToken = this.jidToName(resolved);
+        }
+      }
+
+      const mentionTokens = [...new Set(tokens.map((candidate) => this.jidToPhone(candidate)).filter(Boolean))];
+      const mentionTextCandidates = new Set();
+      for (const token of mentionTokens) {
+        if (!token) continue;
+        mentionTextCandidates.add(token);
+        if (/^\d+$/.test(token)) mentionTextCandidates.add(`+${token}`);
+      }
+      if (typeof nameToken === 'string') {
+        const trimmed = nameToken.trim();
+        if (trimmed && trimmed !== 'Unknown' && trimmed !== 'You') mentionTextCandidates.add(trimmed);
+      }
+
+      let replaced = false;
+      for (const token of mentionTextCandidates) {
+        const regex = buildMentionRegex(token);
+        const next = content.replace(regex, replacement);
+        if (next === content) continue;
+        content = next;
+        replaced = true;
+      }
+      if (!replaced && shouldAppendIfNotFound) {
+        trailingMentions.add(replacement);
+      }
     }
-    return content;
+
+    if (mentionTarget === 'discord' && trailingMentions.size) {
+      const suffix = [...trailingMentions].join(' ');
+      content = content ? `${content} ${suffix}` : suffix;
+    }
+
+    return { content, discordMentions: [...discordMentions] };
   },
   updateContacts(rawContacts) {
     const contacts = rawContacts.chats || rawContacts.contacts || rawContacts;

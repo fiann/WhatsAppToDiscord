@@ -10,6 +10,10 @@ All bot controls now run exclusively through Discord slash commands. Type `/` in
 Request a pairing code for a specific phone number.  
 Usage: `/pairwithcode number:<E.164 phone number>`
 
+### `/chatinfo`
+Show which WhatsApp chat the current channel is linked to (JID + type).  
+Usage: `/chatinfo`
+
 ### `/start`
 Create a brand-new WhatsApp conversation and channel link.  
 Usage: `/start contact:<phone number or saved contact name>`
@@ -66,6 +70,46 @@ Usage: `/dcprefix enabled:<true|false>`
 ### `/waprefix`
 Toggle whether WhatsApp sender names are prepended inside Discord messages.  
 Usage: `/waprefix enabled:<true|false>`
+
+### `/waplatformsuffix`
+Toggle whether WhatsApp messages mirrored to Discord include a suffix showing the sender platform (Android/iOS/Desktop/Web).  
+Usage: `/waplatformsuffix enabled:<true|false>`
+
+---
+
+## Privacy
+
+### `/hidephonenumbers`
+Hide WhatsApp phone numbers on Discord (use pseudonyms when a real contact name isn’t available).  
+Usage: `/hidephonenumbers enabled:<true|false>`
+
+---
+
+## Mentions
+
+WA2DC can optionally translate WhatsApp @mentions into Discord user mentions, if you link a WhatsApp contact to a Discord user.
+This only works for **real WhatsApp mentions** (select the person from WhatsApp’s mention picker); manually typing `@name` without selecting won’t include mention metadata and can’t be translated reliably.
+If a WhatsApp contact is linked, WA2DC will also translate **Discord user @mentions** into **WhatsApp mentions** when forwarding messages from Discord to WhatsApp (you must use a real Discord mention — select the user from autocomplete so Discord inserts a `<@...>` mention).
+
+### `/linkmention`
+Link a WhatsApp contact to a Discord user so future WhatsApp @mentions ping them in Discord.  
+Usage: `/linkmention contact:<phone number or saved contact name> user:<@user>`
+Note: phone numbers can include `+`, spaces, or dashes; WA2DC normalizes them automatically.
+Note: WhatsApp can represent the same person as a phone JID (`...@s.whatsapp.net`, “PN”) and/or a Linked-Device ID (`...@lid`, “LID”). If mentions don’t ping even though the link exists, you may be receiving **LID mentions**. You can link the LID directly by passing it as the contact value, e.g. `/linkmention contact:<someid@lid> user:<@user>`. On older versions, you may need to link **both** the PN and LID for the same contact.
+
+### `/unlinkmention`
+Remove a WhatsApp→Discord mention link for a contact.  
+Usage: `/unlinkmention contact:<phone number or saved contact name>`
+
+### `/mentionlinks`
+List all configured WhatsApp→Discord mention links.
+
+### `/jidinfo`
+Show the known WhatsApp IDs (PN `@s.whatsapp.net` and/or LID `@lid`) for a contact, and whether those IDs are linked for mention pings.  
+Usage: `/jidinfo contact:<phone number or saved contact name>`
+How to find PN/LID:
+- Easiest: run `/jidinfo contact:<name or number>` and look for lines marked `(PN)` and `(LID)`.
+- Advanced: open `storage/contacts` and search for the contact name; keys ending in `@s.whatsapp.net` are PN, keys ending in `@lid` are LID.
 
 ---
 
@@ -180,6 +224,9 @@ Usage: `/redirectbots enabled:<true|false>`
 ### `/redirectwebhooks`
 Allow or block Discord webhook messages from being forwarded to WhatsApp.  
 Usage: `/redirectwebhooks enabled:<true|false>`
+
+### Typing indicators (automatic)
+When someone starts typing in a linked Discord channel, WA2DC sends WhatsApp presence updates (`composing` / `paused`) to the linked chat so your WhatsApp account shows “typing…”. This only runs when Discord → WhatsApp bridging is enabled (bidirectional or `/oneway direction:whatsapp`). WhatsApp cannot show *which* Discord user is typing—only that the bridge account is.
 
 ### `/publishing`
 Toggle automatic cross-posting for messages sent to Discord news channels.  

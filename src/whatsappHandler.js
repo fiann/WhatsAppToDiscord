@@ -646,17 +646,19 @@ const connectToWhatsApp = async (retry = 1) => {
                 }
 
                 const [nMsgType, message] = utils.whatsapp.getMessage(rawMessage, messageType);
+                const { content, discordMentions } = await utils.whatsapp.getContent(message, nMsgType, messageType, { mentionTarget: 'discord' });
                 state.dcClient.emit('whatsappMessage', {
                     id: utils.whatsapp.getId(rawMessage),
                     name: await utils.whatsapp.getSenderName(rawMessage),
-                    content: utils.whatsapp.getContent(message, nMsgType, messageType),
+                    content,
                     quote: await utils.whatsapp.getQuote(rawMessage),
                     file: await utils.whatsapp.getFile(rawMessage, messageType),
                     profilePic: await utils.whatsapp.getProfilePic(rawMessage),
                     channelJid: await utils.whatsapp.getChannelJid(rawMessage),
                     isGroup: utils.whatsapp.isGroup(rawMessage),
                     isForwarded: utils.whatsapp.isForwarded(message),
-                    isEdit: messageType === 'editedMessage'
+                    isEdit: messageType === 'editedMessage',
+                    discordMentions,
                 });
                 const ts = utils.whatsapp.getTimestamp(rawMessage);
                 if (ts > state.startTime) state.startTime = ts;
@@ -867,12 +869,15 @@ const connectToWhatsApp = async (retry = 1) => {
         const hasOnlyCustomEmoji = emojiData.matches.length > 0 && emojiData.rawWithoutEmoji.trim() === '';
         const emojiFallbackText = emojiData.matches.map((entry) => `:${entry.name}:`).join(' ');
 
-        let text = utils.whatsapp.convertDiscordFormatting(message.cleanContent ?? '');
+        let text = utils.whatsapp.convertDiscordFormatting(message.content ?? message.cleanContent ?? '');
         if (message.reference) {
             // Discord prepends a mention to replies which results in all
             // participants being tagged on WhatsApp. Remove the leading
             // mention so no unintended mass mentions occur.
-            text = text.replace(/^@\S+\s*/, '');
+            text = text.replace(/^(<@!?\d+>|@\S+)\s*/, '');
+        }
+        if (text && typeof text.normalize === 'function') {
+            text = text.normalize('NFKC');
         }
 
         const stripped = utils.discord.stripCustomEmojiCodes(text).trim();
@@ -905,7 +910,36 @@ const connectToWhatsApp = async (retry = 1) => {
             text = text.replace(/\s{2,}/g, ' ').trim();
         }
 
-        const mentionJids = utils.whatsapp.getMentionedJids(text);
+        const replyMentionId = message.reference ? message.mentions?.repliedUser?.id : null;
+        const mentionDescriptors = [];
+        const mentionedUsers = message.mentions?.users ? [...message.mentions.users.values()] : [];
+        for (const user of mentionedUsers) {
+            if (!user?.id) continue;
+            if (replyMentionId && user.id === replyMentionId) continue;
+            const tokens = new Set();
+            const member = message.mentions?.members?.get(user.id);
+            if (member?.displayName) tokens.add(member.displayName);
+            if (user.globalName) tokens.add(user.globalName);
+            if (user.username) tokens.add(user.username);
+            mentionDescriptors.push({
+                discordUserId: user.id,
+                displayTokens: [...tokens],
+                rawTokens: [`<@${user.id}>`, `<@!${user.id}>`],
+            });
+        }
+
+        const linkedMentions = typeof utils.whatsapp.applyDiscordMentionLinks === 'function'
+            ? await utils.whatsapp.applyDiscordMentionLinks(text, mentionDescriptors, { chatJid: jid })
+            : { text, mentionJids: [] };
+        text = linkedMentions.text ?? text;
+
+        const mentionJidsRaw = [...new Set([
+            ...linkedMentions.mentionJids,
+            ...utils.whatsapp.getMentionedJids(text),
+        ])];
+        const mentionJids = [...new Set((await Promise.all(
+            mentionJidsRaw.map((candidate) => utils.whatsapp.preferMentionJidForChat(candidate, jid)),
+        )).filter(Boolean))];
 
         if (shouldSendAttachments) {
             let first = true;
@@ -990,17 +1024,50 @@ const connectToWhatsApp = async (retry = 1) => {
             key.participant = utils.whatsapp.toJid(message.author.username);
         }
 
-        let text = utils.whatsapp.convertDiscordFormatting(message.cleanContent);
+        let text = utils.whatsapp.convertDiscordFormatting(message.content ?? message.cleanContent);
         if (message.reference) {
             // Remove Discord's automatic reply mention to avoid tagging
             // every participant on WhatsApp when editing a reply.
-            text = text.replace(/^@\S+\s*/, '');
+            text = text.replace(/^(<@!?\d+>|@\S+)\s*/, '');
+        }
+        if (text && typeof text.normalize === 'function') {
+            text = text.normalize('NFKC');
         }
         if (state.settings.DiscordPrefix) {
             const prefix = state.settings.DiscordPrefixText || message.member?.nickname || message.author.username;
             text = `*${prefix}*\n${text}`;
         }
-        const editMentions = utils.whatsapp.getMentionedJids(text);
+
+        const replyMentionId = message.reference ? message.mentions?.repliedUser?.id : null;
+        const mentionDescriptors = [];
+        const mentionedUsers = message.mentions?.users ? [...message.mentions.users.values()] : [];
+        for (const user of mentionedUsers) {
+            if (!user?.id) continue;
+            if (replyMentionId && user.id === replyMentionId) continue;
+            const tokens = new Set();
+            const member = message.mentions?.members?.get(user.id);
+            if (member?.displayName) tokens.add(member.displayName);
+            if (user.globalName) tokens.add(user.globalName);
+            if (user.username) tokens.add(user.username);
+            mentionDescriptors.push({
+                discordUserId: user.id,
+                displayTokens: [...tokens],
+                rawTokens: [`<@${user.id}>`, `<@!${user.id}>`],
+            });
+        }
+
+        const linkedMentions = typeof utils.whatsapp.applyDiscordMentionLinks === 'function'
+            ? await utils.whatsapp.applyDiscordMentionLinks(text, mentionDescriptors, { chatJid: jid })
+            : { text, mentionJids: [] };
+        text = linkedMentions.text ?? text;
+
+        const editMentionsRaw = [...new Set([
+            ...linkedMentions.mentionJids,
+            ...utils.whatsapp.getMentionedJids(text),
+        ])];
+        const editMentions = [...new Set((await Promise.all(
+            editMentionsRaw.map((candidate) => utils.whatsapp.preferMentionJidForChat(candidate, jid)),
+        )).filter(Boolean))];
         try {
             const editMsg = await client.sendMessage(
                 jid,

@@ -16,7 +16,7 @@ if (!globalThis.crypto) {
 }
 
 (async () => {
-  const version = 'v2.1.3';
+  const version = 'v2.1.4';
   state.version = version;
   const streams = [
     { stream: pino.destination('logs.txt') },
@@ -87,6 +87,10 @@ if (!globalThis.crypto) {
   state.logger.info('Loaded settings.');
   if (isSmokeTest) {
     state.logger.info('Running in smoke-test mode; external clients are skipped.');
+  }
+  if (utils.whatsapp.normalizeMentionLinks()) {
+    await storage.saveSettings().catch(() => {});
+    state.logger.info('Normalized WhatsApp→Discord mention links.');
   }
 
   utils.ensureDownloadServer();
