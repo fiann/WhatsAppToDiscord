@@ -30,11 +30,7 @@ jobs:
 
       - name: Bundle with esbuild (release smoke)
         if: matrix.os == 'ubuntu-latest' && matrix.node == 25
-        run: |
-          npx esbuild src/runner.js \
-            --bundle --platform=node --format=cjs \
-            --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js \
-            --target=node25 --outfile=out.cjs
+        run: npm run bundle
 
       - name: Run bundled watchdog smoke (out.cjs)
         if: matrix.os == 'ubuntu-latest' && matrix.node == 25
