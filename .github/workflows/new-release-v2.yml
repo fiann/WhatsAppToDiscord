@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '25'
           cache: npm
 
       - name: Install dependencies
@@ -31,15 +31,15 @@ jobs:
           npx esbuild src/runner.js \
             --bundle --platform=node --format=cjs \
             --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js \
-            --target=node22 --outfile=out.cjs
+            --target=node25 --outfile=out.cjs
 
       - name: Generate binaries
         run: |
           mkdir -p build
-          npx -y @yao-pkg/pkg out.cjs -t node22-linux-x64   --options no-warnings -o build/WA2DC-Linux
-          npx -y @yao-pkg/pkg out.cjs -t node22-linux-arm64 --options no-warnings -o build/WA2DC-Linux-arm64
-          npx -y @yao-pkg/pkg out.cjs -t node22-macos-x64   --options no-warnings -o build/WA2DC-macOS
-          npx -y @yao-pkg/pkg out.cjs -t node22-win-x64     --options no-warnings --no-bytecode \
+          npx -y @yao-pkg/pkg out.cjs -t node25-linux-x64   --options no-warnings -o build/WA2DC-Linux
+          npx -y @yao-pkg/pkg out.cjs -t node25-linux-arm64 --options no-warnings -o build/WA2DC-Linux-arm64
+          npx -y @yao-pkg/pkg out.cjs -t node25-macos-x64   --options no-warnings -o build/WA2DC-macOS
+          npx -y @yao-pkg/pkg out.cjs -t node25-win-x64     --options no-warnings --no-bytecode \
                                                       --public --public-packages "*" -o build/WA2DC.exe
 
       - name: Generate checksums

@@ -24,6 +24,8 @@ Common commands:
 - Install deps: `npm ci`
 - Run bot (watchdog runner): `npm start` (runs `node src/runner.js`)
 - Run docs site locally: `npm run docs`
+- Bundle for packaging: `npm run bundle` (creates `out.cjs`)
+- Build packaged binary for current OS/CPU: `npm run build:bin` (outputs to `build/`)
 - Lint: `npm run lint`
 
 Quick “does it boot?” check without external connections:
@@ -38,7 +40,7 @@ Top-level:
 
 - `README.md`: high-level overview
 - `docs/README.md`, `docs/setup.md`, `docs/commands.md`: user docs (setup, commands, troubleshooting)
-- `out.js`, `build/`: build artifacts for packaged releases (don’t hand-edit)
+- `out.cjs`, `out.js`, `build/`: build artifacts for packaged releases (don’t hand-edit)
 
 Core runtime (`src/`):
 
@@ -154,8 +156,8 @@ CI runs `npm test` (which includes the smoke boot test).
 
 Packaged release pipeline (GitHub Actions) bundles and ships binaries:
 
-- Bundling: esbuild bundles `src/runner.js` → `out.js` (see `.github/workflows/new-release-v2.yml`)
-- Packaging: `pkg` builds platform binaries from `out.js`
+- Bundling: esbuild bundles `src/runner.js` → `out.cjs` (see `.github/workflows/new-release-v2.yml`)
+- Packaging: `pkg` builds platform binaries from `out.cjs`
 - `process.pkg` is used to detect packaged runtime vs source runtime
 
 If you introduce dependencies that rely on dynamic filesystem access, native addons, or non-standard resolution, validate that:
