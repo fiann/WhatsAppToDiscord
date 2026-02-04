@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '25'
+          node-version: '24'
           cache: npm
 
       - name: Install dependencies
@@ -32,10 +32,10 @@ jobs:
       - name: Generate binaries
         run: |
           mkdir -p build
-          npx -y @yao-pkg/pkg out.cjs -t node25-linux-x64   --options no-warnings -o build/WA2DC-Linux
-          npx -y @yao-pkg/pkg out.cjs -t node25-linux-arm64 --options no-warnings -o build/WA2DC-Linux-arm64
-          npx -y @yao-pkg/pkg out.cjs -t node25-macos-x64   --options no-warnings -o build/WA2DC-macOS
-          npx -y @yao-pkg/pkg out.cjs -t node25-win-x64     --options no-warnings --no-bytecode \
+          npx -y @yao-pkg/pkg out.cjs -t node24-linux-x64   --options no-warnings -o build/WA2DC-Linux
+          npx -y @yao-pkg/pkg out.cjs -t node24-linux-arm64 --options no-warnings -o build/WA2DC-Linux-arm64
+          npx -y @yao-pkg/pkg out.cjs -t node24-macos-x64   --options no-warnings -o build/WA2DC-macOS
+          npx -y @yao-pkg/pkg out.cjs -t node24-win-x64     --options no-warnings --no-bytecode \
                                                       --public --public-packages "*" -o build/WA2DC.exe
 
       - name: Generate checksums

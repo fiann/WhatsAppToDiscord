@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/runner.js",
     "docs": "docsify serve docs",
-    "bundle": "esbuild src/runner.js --bundle --platform=node --format=cjs --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js --target=node25 --outfile=out.cjs",
+    "bundle": "esbuild src/runner.js --bundle --platform=node --format=cjs --external:sharp --external:qrcode-terminal --external:jimp --external:link-preview-js --target=node24 --outfile=out.cjs",
     "build:bin": "node scripts/buildBinary.js",
     "build:bin:smoke": "node scripts/buildBinary.js --smoke",
     "test": "node --test",
@@ -17,7 +17,7 @@
   "repository": "https://github.com/arespawn/WhatsAppToDiscord",
   "license": "MIT",
   "engines": {
-    "node": ">=25"
+    "node": ">=24"
   },
   "dependencies": {
     "@adiwajshing/keyed-db": "^0.2.4",

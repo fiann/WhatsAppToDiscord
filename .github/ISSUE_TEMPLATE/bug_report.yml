@@ -71,7 +71,7 @@ body:
     attributes:
       label: Node.js version
       description: Output of `node -v` (or "N/A" if using a packaged release or Docker).
-      placeholder: "v25.1.0"
+      placeholder: "v24.0.0"
     validations:
       required: true
 

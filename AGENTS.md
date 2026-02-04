@@ -17,7 +17,7 @@ Docs for end-users live in `docs/` and are published via docsify.
 
 Prereqs:
 
-- Node.js **>= 25** (repo uses ESM)
+- Node.js **>= 24** (repo uses ESM)
 
 Common commands:
 

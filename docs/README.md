@@ -8,7 +8,7 @@ Originally created by [Fatih Kilic](https://github.com/FKLC), now maintained by 
 
 ## Requirements
 
-- Node.js 25 or higher
+- Node.js 24 or higher
 
 ## Features
 

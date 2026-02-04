@@ -17,7 +17,11 @@ function archToPkgArch(arch) {
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { stdio: 'inherit', ...options });
+  const result = spawnSync(command, args, {
+    stdio: 'inherit',
+    ...(process.platform === 'win32' ? { shell: true } : null),
+    ...options,
+  });
   if (result.error) throw result.error;
   if (typeof result.status === 'number' && result.status !== 0) {
     throw new Error(`Command failed (${result.status}): ${command} ${args.join(' ')}`);
@@ -48,7 +52,7 @@ function buildOutputPath(pkgOs, pkgArch) {
 
 const args = new Set(process.argv.slice(2));
 const shouldSmokeTest = args.has('--smoke');
-const nodeMajor = process.env.WA2DC_PKG_NODE_MAJOR || '25';
+const nodeMajor = process.env.WA2DC_PKG_NODE_MAJOR || '24';
 
 const pkgOs = platformToPkgOs(process.platform);
 const pkgArch = archToPkgArch(process.arch);
