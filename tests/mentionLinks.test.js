@@ -75,6 +75,52 @@ test('Unlinked WhatsApp mentions fall back to WhatsApp contact names', async () 
   }
 });
 
+test('Linked WhatsApp mentions use cached Discord names in name-target mode', async () => {
+  const originalWaClient = state.waClient;
+  const originalDcClient = state.dcClient;
+  const originalGuildId = state.settings.GuildID;
+  const originalContacts = snapshotObject(state.contacts);
+  const originalLinks = snapshotObject(state.settings.WhatsAppDiscordMentionLinks);
+
+  try {
+    restoreObject(state.contacts, {});
+    state.waClient = {
+      contacts: state.contacts,
+      user: { id: '0@s.whatsapp.net' },
+      signalRepository: { lidMapping: {} },
+    };
+
+    const pnJid = '14155550123@s.whatsapp.net';
+    const discordUserId = '123456789012345678';
+
+    state.dcClient = {
+      users: {
+        cache: new Map([
+          [discordUserId, { id: discordUserId, username: 'Panos' }],
+        ]),
+      },
+      guilds: { cache: new Map() },
+    };
+    state.settings.GuildID = 'guild-1';
+    state.settings.WhatsAppDiscordMentionLinks = { [pnJid]: discordUserId };
+
+    const msg = {
+      text: 'Hi @14155550123',
+      contextInfo: { mentionedJid: [pnJid] },
+    };
+
+    const result = await utils.whatsapp.getContent(msg, 'extendedTextMessage', 'extendedTextMessage', { mentionTarget: 'name' });
+    assert.equal(result.content, 'Hi @Panos');
+    assert.deepEqual(result.discordMentions, []);
+  } finally {
+    state.waClient = originalWaClient;
+    state.dcClient = originalDcClient;
+    state.settings.GuildID = originalGuildId;
+    restoreObject(state.contacts, originalContacts);
+    state.settings.WhatsAppDiscordMentionLinks = originalLinks;
+  }
+});
+
 test('Linked mentions work when WhatsApp provides LID JIDs but message text contains the PN token', async () => {
   const originalWaClient = state.waClient;
   const originalContacts = snapshotObject(state.contacts);

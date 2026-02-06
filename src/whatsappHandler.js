@@ -124,6 +124,73 @@ const getStoredMessageWithJidFallback = async (key = {}) => {
     return null;
 };
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const toMentionLabel = (value) => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim().replace(/^@+/, '');
+    if (!trimmed) return null;
+    return `@${trimmed}`;
+};
+
+const replaceLiteralMentionTokens = (text, replacements = []) => {
+    if (!text || !Array.isArray(replacements) || !replacements.length) return text;
+    let nextText = text;
+    for (const replacement of replacements) {
+        const value = typeof replacement?.value === 'string' ? replacement.value.trim() : '';
+        if (!value) continue;
+        const rawTokens = Array.isArray(replacement?.rawTokens) ? replacement.rawTokens : [];
+        const candidates = [...new Set(rawTokens
+            .map((token) => (typeof token === 'string' ? token.trim() : ''))
+            .filter(Boolean))];
+        for (const token of candidates) {
+            const regex = new RegExp(escapeRegex(token), 'g');
+            nextText = nextText.replace(regex, value);
+        }
+    }
+    return nextText;
+};
+
+const collectDiscordMentionData = (message, replyMentionId = null) => {
+    const mentionDescriptors = [];
+    const fallbackReplacements = [];
+
+    const mentionedUsers = message?.mentions?.users ? [...message.mentions.users.values()] : [];
+    for (const user of mentionedUsers) {
+        if (!user?.id) continue;
+        if (replyMentionId && user.id === replyMentionId) continue;
+        const member = message?.mentions?.members?.get(user.id);
+        const displayTokens = [...new Set([
+            member?.displayName,
+            user.globalName,
+            user.username,
+        ].map((value) => (typeof value === 'string' ? value.trim() : '')).filter(Boolean))];
+        const rawTokens = [`<@${user.id}>`, `<@!${user.id}>`];
+        mentionDescriptors.push({
+            discordUserId: user.id,
+            displayTokens,
+            rawTokens,
+        });
+        const fallbackLabel = toMentionLabel(displayTokens[0]);
+        if (fallbackLabel) {
+            fallbackReplacements.push({ rawTokens, value: fallbackLabel });
+        }
+    }
+
+    const mentionedRoles = message?.mentions?.roles ? [...message.mentions.roles.values()] : [];
+    for (const role of mentionedRoles) {
+        if (!role?.id) continue;
+        const fallbackLabel = toMentionLabel(role.name);
+        if (!fallbackLabel) continue;
+        fallbackReplacements.push({
+            rawTokens: [`<@&${role.id}>`],
+            value: fallbackLabel,
+        });
+    }
+
+    return { mentionDescriptors, fallbackReplacements };
+};
+
 const handlePollUpdateMessage = async (client, rawMessage) => {
     const pollUpdate = rawMessage?.message?.pollUpdateMessage;
     const pollKey = pollUpdate?.pollCreationMessageKey;
@@ -911,27 +978,13 @@ const connectToWhatsApp = async (retry = 1) => {
         }
 
         const replyMentionId = message.reference ? message.mentions?.repliedUser?.id : null;
-        const mentionDescriptors = [];
-        const mentionedUsers = message.mentions?.users ? [...message.mentions.users.values()] : [];
-        for (const user of mentionedUsers) {
-            if (!user?.id) continue;
-            if (replyMentionId && user.id === replyMentionId) continue;
-            const tokens = new Set();
-            const member = message.mentions?.members?.get(user.id);
-            if (member?.displayName) tokens.add(member.displayName);
-            if (user.globalName) tokens.add(user.globalName);
-            if (user.username) tokens.add(user.username);
-            mentionDescriptors.push({
-                discordUserId: user.id,
-                displayTokens: [...tokens],
-                rawTokens: [`<@${user.id}>`, `<@!${user.id}>`],
-            });
-        }
+        const { mentionDescriptors, fallbackReplacements } = collectDiscordMentionData(message, replyMentionId);
 
         const linkedMentions = typeof utils.whatsapp.applyDiscordMentionLinks === 'function'
             ? await utils.whatsapp.applyDiscordMentionLinks(text, mentionDescriptors, { chatJid: jid })
             : { text, mentionJids: [] };
         text = linkedMentions.text ?? text;
+        text = replaceLiteralMentionTokens(text, fallbackReplacements);
 
         const mentionJidsRaw = [...new Set([
             ...linkedMentions.mentionJids,
@@ -1039,27 +1092,13 @@ const connectToWhatsApp = async (retry = 1) => {
         }
 
         const replyMentionId = message.reference ? message.mentions?.repliedUser?.id : null;
-        const mentionDescriptors = [];
-        const mentionedUsers = message.mentions?.users ? [...message.mentions.users.values()] : [];
-        for (const user of mentionedUsers) {
-            if (!user?.id) continue;
-            if (replyMentionId && user.id === replyMentionId) continue;
-            const tokens = new Set();
-            const member = message.mentions?.members?.get(user.id);
-            if (member?.displayName) tokens.add(member.displayName);
-            if (user.globalName) tokens.add(user.globalName);
-            if (user.username) tokens.add(user.username);
-            mentionDescriptors.push({
-                discordUserId: user.id,
-                displayTokens: [...tokens],
-                rawTokens: [`<@${user.id}>`, `<@!${user.id}>`],
-            });
-        }
+        const { mentionDescriptors, fallbackReplacements } = collectDiscordMentionData(message, replyMentionId);
 
         const linkedMentions = typeof utils.whatsapp.applyDiscordMentionLinks === 'function'
             ? await utils.whatsapp.applyDiscordMentionLinks(text, mentionDescriptors, { chatJid: jid })
             : { text, mentionJids: [] };
         text = linkedMentions.text ?? text;
+        text = replaceLiteralMentionTokens(text, fallbackReplacements);
 
         const editMentionsRaw = [...new Set([
             ...linkedMentions.mentionJids,

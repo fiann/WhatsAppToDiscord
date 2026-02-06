@@ -2775,7 +2775,7 @@ const whatsapp = {
     const mentions = new Set();
     if (!text) return [];
 
-    const cleaned = text.replace(/<@!?\d+>/g, '');
+    const cleaned = text.replace(/<@!?\d+>|<@&\d+>/g, '');
     const lower = cleaned.toLowerCase();
     const contactStore = state.waClient?.contacts || state.contacts || {};
 
@@ -3305,6 +3305,52 @@ const whatsapp = {
       };
     };
 
+    const normalizeMentionName = (value, { allowPhone = true } = {}) => {
+      if (typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (!trimmed || trimmed === 'Unknown' || trimmed === 'You') return null;
+      if (!allowPhone && this.isPhoneLike(trimmed)) return null;
+      return trimmed;
+    };
+
+    const getDiscordNameForUserId = (discordUserId) => {
+      const normalized = normalizeDiscordUserId(discordUserId);
+      if (!normalized) return null;
+      const guildId = typeof state.settings?.GuildID === 'string' ? state.settings.GuildID.trim() : '';
+      const guild = guildId ? state.dcClient?.guilds?.cache?.get(guildId) : null;
+      const member = guild?.members?.cache?.get(normalized);
+      const memberName = normalizeMentionName(member?.displayName, { allowPhone: false });
+      if (memberName) return memberName;
+      const user = member?.user || state.dcClient?.users?.cache?.get(normalized);
+      return normalizeMentionName(user?.globalName, { allowPhone: false })
+        || normalizeMentionName(user?.username, { allowPhone: false })
+        || null;
+    };
+
+    const resolveBestMentionName = (jidCandidates, linkedDiscordUserId = null) => {
+      const normalizedCandidates = [...new Set((Array.isArray(jidCandidates) ? jidCandidates : [jidCandidates])
+        .map((candidate) => this.formatJid(candidate))
+        .filter(Boolean))];
+
+      if (linkedDiscordUserId) {
+        const discordName = getDiscordNameForUserId(linkedDiscordUserId);
+        if (discordName) return discordName;
+      }
+
+      for (const candidate of normalizedCandidates) {
+        const display = normalizeMentionName(this.jidToName(candidate), { allowPhone: false });
+        if (display) return display;
+      }
+
+      for (const candidate of normalizedCandidates) {
+        const fallback = normalizeMentionName(this.jidToName(candidate));
+        if (fallback) return fallback;
+      }
+
+      const phoneFallback = normalizedCandidates.map((candidate) => this.jidToPhone(candidate)).find(Boolean);
+      return phoneFallback || 'Unknown';
+    };
+
     const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const buildMentionRegex = (token) => new RegExp(`@${escapeRegex(token)}(?=\\W|$)`, 'g');
     const trailingMentions = new Set();
@@ -3313,29 +3359,31 @@ const whatsapp = {
       const formattedMentionJid = this.formatJid(jid);
       if (!formattedMentionJid) continue;
 
-      let replacement = `@${this.jidToName(formattedMentionJid)}`;
-      let tokens = [formattedMentionJid];
-      let nameToken = this.jidToName(formattedMentionJid);
+      const linked = await resolveLinkedDiscordUserId(formattedMentionJid);
+      const [primary, alternate] = await this.hydrateJidPair(formattedMentionJid, null);
+      const resolved = this.resolveKnownJid(primary, alternate) || primary || alternate || formattedMentionJid;
+      const tokenCandidates = [...new Set([
+        formattedMentionJid,
+        primary,
+        alternate,
+        resolved,
+        ...(Array.isArray(linked?.jids) ? linked.jids : []),
+      ].filter(Boolean))];
+
+      let replacement = `@${resolveBestMentionName(
+        tokenCandidates,
+        mentionTarget === 'name' ? linked?.discordUserId : null,
+      )}`;
+      let nameToken = resolveBestMentionName(tokenCandidates);
       let shouldAppendIfNotFound = false;
 
-      if (mentionTarget === 'discord') {
-        const linked = await resolveLinkedDiscordUserId(formattedMentionJid);
-        if (linked?.discordUserId) {
-          discordMentions.add(linked.discordUserId);
-          replacement = `<@${linked.discordUserId}>`;
-          tokens = linked.jids;
-          nameToken = this.jidToName(this.resolveKnownJid(...linked.jids) || formattedMentionJid);
-          shouldAppendIfNotFound = true;
-        } else {
-          const [primary, alternate] = await this.hydrateJidPair(formattedMentionJid, null);
-          const resolved = this.resolveKnownJid(primary, alternate) || primary || alternate || formattedMentionJid;
-          replacement = `@${this.jidToName(resolved)}`;
-          tokens = [formattedMentionJid, primary, alternate, resolved].filter(Boolean);
-          nameToken = this.jidToName(resolved);
-        }
+      if (mentionTarget === 'discord' && linked?.discordUserId) {
+        discordMentions.add(linked.discordUserId);
+        replacement = `<@${linked.discordUserId}>`;
+        shouldAppendIfNotFound = true;
       }
 
-      const mentionTokens = [...new Set(tokens.map((candidate) => this.jidToPhone(candidate)).filter(Boolean))];
+      const mentionTokens = [...new Set(tokenCandidates.map((candidate) => this.jidToPhone(candidate)).filter(Boolean))];
       const mentionTextCandidates = new Set();
       for (const token of mentionTokens) {
         if (!token) continue;
