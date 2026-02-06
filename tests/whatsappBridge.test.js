@@ -352,6 +352,48 @@ test('Discord delete/edit/reaction events send the expected WhatsApp actions', a
   }
 });
 
+test('Discord raw user and role mentions are converted before forwarding to WhatsApp', async () => {
+  const harness = await setupWhatsAppHarness({ oneWay: 0b11 });
+  try {
+    harness.fakeClient.ev.emit('discordMessage', {
+      jid: 'jid@s.whatsapp.net',
+      message: {
+        id: 'dc-mention-msg',
+        content: 'Hi <@123456789012345678> and <@&987654321098765432>',
+        cleanContent: 'Hi @Panos and @Moderators',
+        webhookId: null,
+        author: { username: 'BridgeUser' },
+        member: { displayName: 'BridgeUser' },
+        channel: { send: async () => {} },
+        attachments: new Map(),
+        stickers: new Map(),
+        embeds: [],
+        mentions: {
+          users: new Map([
+            ['123456789012345678', {
+              id: '123456789012345678',
+              username: 'panos-discord',
+              globalName: 'Panos',
+            }],
+          ]),
+          members: new Map([
+            ['123456789012345678', { displayName: 'Panos' }],
+          ]),
+          roles: new Map([
+            ['987654321098765432', { id: '987654321098765432', name: 'Moderators' }],
+          ]),
+        },
+      },
+    });
+
+    await delay(0);
+
+    assert.equal(harness.fakeClient.sendCalls[0]?.content?.text, 'Hi @Panos and @Moderators');
+  } finally {
+    harness.cleanup();
+  }
+});
+
 test('oneWay gating blocks Discord -> WhatsApp sends', async () => {
   const harness = await setupWhatsAppHarness({ oneWay: 0b01 }); // WhatsApp -> Discord only
   try {
