@@ -31,7 +31,23 @@ Detailed options and platform notes are documented in [`docs/install-scripts.md`
 - Mirrors messages, media, reactions, and edits between WhatsApp and Discord
 - Lets you whitelist which chats appear in Discord
 - Bridges WhatsApp polls into Discord (creation and live updates; voting stays in WhatsApp due to API limits)
+- AI-powered summary channels: periodic summaries of bridged conversations delivered to separate WhatsApp groups, Discord channels, or both
 - Self-hosted: runs on your own machine/server
+
+## Summary Channels
+
+Summary channels let you create read-only digest channels alongside your bridged conversations. An AI periodically summarizes the activity in a primary bridged channel and posts the summary to one or more separate channels on WhatsApp, Discord, or both. This is useful for groups where some members prefer a condensed overview rather than following every message.
+
+**Setup:**
+
+1. Set the `WA2DC_SUMMARY_AI_KEY` environment variable with your AI API key (Claude API by default).
+2. In Discord, run `/summary enable` to turn on the feature.
+3. In the primary bridged channel, run `/summary link` with a WhatsApp group JID and/or a Discord channel to designate as the summary destination.
+4. Optionally tune thresholds with `/summary config messages=50` or `/summary config hours=8`. Summaries trigger when either threshold is reached first (default: 100 messages or 24 hours).
+
+Each primary channel can have its own independent summary configuration and destinations. Summary channels are read-only: if someone posts in one, the bot replies with a link to the main conversation (throttled to once per hour).
+
+**Slash commands:** `/summary enable`, `/summary disable`, `/summary link`, `/summary unlink`, `/summary now`, `/summary config`, `/summary status`
 
 ## Security notes
 
