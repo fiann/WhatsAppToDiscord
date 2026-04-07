@@ -2121,6 +2121,21 @@ const commandHandlers = {
 			);
 		},
 	},
+	qr: {
+		description: "Show a QR code to link WhatsApp.",
+		async execute(ctx) {
+			if (!state.pendingQR) {
+				await ctx.reply(
+					"No QR code available. WhatsApp may already be connected, or the connection hasn't started yet.",
+				);
+				return;
+			}
+			await utils.whatsapp.sendQR(state.pendingQR);
+			await ctx.reply(
+				"QR code sent. Scan it within ~60 seconds. Run `/qr` again if it expires.",
+			);
+		},
+	},
 	pairwithcode: {
 		description: "Request a WhatsApp pairing code.",
 		options: [

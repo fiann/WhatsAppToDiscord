@@ -2870,6 +2870,7 @@ const connectToWhatsApp = async (retry = 1) => {
 		.getControlChannel()
 		.catch(() => null);
 	const { version } = await getBaileysVersion();
+	let qrPromptSent = false;
 	const sendControlMessage = async (message) => {
 		if (!controlChannel || state.shutdownRequested) {
 			return;
@@ -2932,9 +2933,16 @@ const connectToWhatsApp = async (retry = 1) => {
 
 			const { connection, lastDisconnect, qr } = update;
 			if (qr) {
-				utils.whatsapp.sendQR(qr);
+				state.pendingQR = qr;
+				if (!qrPromptSent) {
+					qrPromptSent = true;
+					sendControlMessage(
+						"Ready to connect. Use `/qr` in this channel to generate a QR code, or `/pairwithcode` to pair with a phone number.",
+					);
+				}
 			}
 			if (connection === "close") {
+				qrPromptSent = false;
 				state.logger.error(lastDisconnect?.error);
 				groupRefreshScheduler.clearAll();
 				groupMetadataCache.clear();
@@ -2969,6 +2977,7 @@ const connectToWhatsApp = async (retry = 1) => {
 				return;
 			} else if (connection === "open") {
 				state.waClient = client;
+				state.pendingQR = null;
 
 				retry = 1;
 				await sendControlMessage("WhatsApp connection successfully opened!");

@@ -82,6 +82,7 @@ const state = {
 	goccRuns: {},
 	updateInfo: null,
 	version: "",
+	pendingQR: null,
 	shutdownRequested: false,
 };
 
