@@ -245,6 +245,26 @@ const sqliteStore = {
       );
       CREATE INDEX IF NOT EXISTS idx_message_store_expires_at ON message_store(expires_at);
       CREATE INDEX IF NOT EXISTS idx_message_store_updated_at ON message_store(updated_at);
+      CREATE TABLE IF NOT EXISTS summary_buffer (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_jid TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        content TEXT,
+        media_description TEXT,
+        reply_to_sender TEXT,
+        reply_to_content TEXT,
+        thread_id TEXT,
+        timestamp INTEGER NOT NULL,
+        discord_message_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_summary_buffer_jid ON summary_buffer(channel_jid);
+      CREATE INDEX IF NOT EXISTS idx_summary_buffer_ts ON summary_buffer(timestamp);
+      CREATE TABLE IF NOT EXISTS summary_state (
+        channel_jid TEXT PRIMARY KEY,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        last_summary_at INTEGER NOT NULL,
+        previous_summary TEXT
+      );
     `);
 
 		this._configureEncryption(process.env.WA2DC_DB_PASSPHRASE || "");
@@ -434,6 +454,107 @@ const sqliteStore = {
 	clearMessageStore() {
 		this._ensureDbReady();
 		this._db.prepare("DELETE FROM message_store").run();
+	},
+
+	// --- Summary buffer methods ---
+
+	insertSummaryMessage(channelJid, data) {
+		this._ensureDbReady();
+		this._db
+			.prepare(`
+      INSERT INTO summary_buffer (channel_jid, sender, content, media_description, reply_to_sender, reply_to_content, thread_id, timestamp, discord_message_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+			.run(
+				channelJid,
+				data.sender,
+				data.content ? this._encodeStoredValue(data.content) : null,
+				data.mediaDescription || null,
+				data.replyToSender || null,
+				data.replyToContent
+					? this._encodeStoredValue(data.replyToContent)
+					: null,
+				data.threadId || null,
+				data.timestamp,
+				data.discordMessageId || null,
+			);
+	},
+
+	getSummaryMessages(channelJid) {
+		this._ensureDbReady();
+		const rows = this._db
+			.prepare(
+				"SELECT * FROM summary_buffer WHERE channel_jid = ? ORDER BY timestamp ASC",
+			)
+			.all(channelJid);
+		return rows.map((row) => ({
+			id: row.id,
+			channelJid: row.channel_jid,
+			sender: row.sender,
+			content: row.content ? this._decodeStoredValue(row.content) : null,
+			mediaDescription: row.media_description,
+			replyToSender: row.reply_to_sender,
+			replyToContent: row.reply_to_content
+				? this._decodeStoredValue(row.reply_to_content)
+				: null,
+			threadId: row.thread_id,
+			timestamp: row.timestamp,
+			discordMessageId: row.discord_message_id,
+		}));
+	},
+
+	getSummaryMessageCount(channelJid) {
+		this._ensureDbReady();
+		const row = this._db
+			.prepare(
+				"SELECT COUNT(*) AS count FROM summary_buffer WHERE channel_jid = ?",
+			)
+			.get(channelJid);
+		return Number(row?.count || 0);
+	},
+
+	clearSummaryBuffer(channelJid) {
+		this._ensureDbReady();
+		this._db
+			.prepare("DELETE FROM summary_buffer WHERE channel_jid = ?")
+			.run(channelJid);
+	},
+
+	getSummaryState(channelJid) {
+		this._ensureDbReady();
+		const row = this._db
+			.prepare("SELECT * FROM summary_state WHERE channel_jid = ?")
+			.get(channelJid);
+		if (!row) return null;
+		return {
+			channelJid: row.channel_jid,
+			messageCount: row.message_count,
+			lastSummaryAt: row.last_summary_at,
+			previousSummary: row.previous_summary
+				? this._decodeStoredValue(row.previous_summary)
+				: null,
+		};
+	},
+
+	upsertSummaryState(channelJid, data) {
+		this._ensureDbReady();
+		this._db
+			.prepare(`
+      INSERT INTO summary_state (channel_jid, message_count, last_summary_at, previous_summary)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(channel_jid) DO UPDATE SET
+        message_count = excluded.message_count,
+        last_summary_at = excluded.last_summary_at,
+        previous_summary = excluded.previous_summary
+    `)
+			.run(
+				channelJid,
+				data.messageCount ?? 0,
+				data.lastSummaryAt ?? Date.now(),
+				data.previousSummary
+					? this._encodeStoredValue(data.previousSummary)
+					: null,
+			);
 	},
 };
 

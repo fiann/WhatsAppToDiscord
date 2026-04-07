@@ -41,6 +41,7 @@ import {
 } from "./oneWay.js";
 import { getPollEncKey, getPollOptions } from "./pollUtils.js";
 import state from "./state.js";
+import summaryScheduler from "./summaryScheduler.js";
 import utils from "./utils.js";
 
 let authState;
@@ -3148,6 +3149,17 @@ const connectToWhatsApp = async (retry = 1) => {
 
 				const channelJid = await utils.whatsapp.getChannelJid(rawMessage);
 				if (!channelJid) {
+					continue;
+				}
+
+				// Intercept messages posted in summary-only WhatsApp channels
+				if (summaryScheduler.isSummaryWhatsAppChannel(channelJid)) {
+					if (!rawMessage?.key?.fromMe) {
+						summaryScheduler.onSummaryChannelMessage(
+							"whatsapp",
+							channelJid,
+						);
+					}
 					continue;
 				}
 

@@ -23,6 +23,8 @@ import {
 import { resolveRestartFlagPath } from "./runnerLogic.js";
 import state from "./state.js";
 import storage from "./storage.js";
+import summaryBuffer from "./summaryBuffer.js";
+import summaryScheduler from "./summaryScheduler.js";
 import utils from "./utils.js";
 
 const {
@@ -1309,6 +1311,19 @@ client.on("typingStart", async (typing) => {
 });
 
 client.on("whatsappMessage", async (message) => {
+	// Feed WhatsApp-origin messages into the summary buffer
+	summaryScheduler.onMessage({
+		channelJid: message.channelJid,
+		sender: message.name || "Unknown",
+		content: message.content || "",
+		mediaDescription: message.file ? "media" : null,
+		replyToSender: message.quote?.name || null,
+		replyToContent: message.quote?.content || null,
+		threadId: null,
+		timestamp: Date.now(),
+		discordMessageId: null,
+	});
+
 	if (!allowsWhatsAppToDiscord()) {
 		return;
 	}
@@ -5187,6 +5202,243 @@ const commandHandlers = {
 			await ctx.reply("Rollback failed. Check logs for details.");
 		},
 	},
+	summary: {
+		description: "Manage periodic AI summaries for this channel.",
+		options: [
+			{
+				name: "action",
+				description:
+					"Action: enable, disable, link, unlink, now, config, status",
+				type: ApplicationCommandOptionTypes.STRING,
+				required: true,
+			},
+			{
+				name: "value",
+				description:
+					"Value for the action (e.g. WhatsApp JID for link, or setting=value for config)",
+				type: ApplicationCommandOptionTypes.STRING,
+				required: false,
+			},
+			{
+				name: "discord_channel",
+				description:
+					"Discord channel for summary output (for link action)",
+				type: ApplicationCommandOptionTypes.CHANNEL,
+				required: false,
+			},
+		],
+		async execute(ctx) {
+			const action = ctx.getStringOption("action")?.toLowerCase();
+			const value = ctx.getStringOption("value");
+			const discordChannel = ctx.interaction?.options?.getChannel?.(
+				"discord_channel",
+			);
+			const primaryJid = utils.discord.channelIdToJid(ctx.channel?.id);
+
+			if (!primaryJid && action !== "enable" && action !== "disable") {
+				await ctx.reply(
+					"This channel is not linked to a WhatsApp chat.",
+				);
+				return;
+			}
+
+			switch (action) {
+				case "enable": {
+					state.settings.SummaryEnabled = true;
+					await storage.saveSettings().catch(() => {});
+					summaryScheduler.start();
+					await ctx.reply("Summary feature enabled.");
+					break;
+				}
+				case "disable": {
+					state.settings.SummaryEnabled = false;
+					await storage.saveSettings().catch(() => {});
+					summaryScheduler.stop();
+					await ctx.reply("Summary feature disabled.");
+					break;
+				}
+				case "link": {
+					if (!state.settings.SummaryChannels) {
+						state.settings.SummaryChannels = {};
+					}
+					const existing =
+						state.settings.SummaryChannels[primaryJid] || {};
+					const destinations = existing.destinations || {};
+					if (value) destinations.whatsapp = value;
+					if (discordChannel)
+						destinations.discord = discordChannel.id;
+					if (!destinations.whatsapp && !destinations.discord) {
+						await ctx.reply(
+							"Provide a WhatsApp JID in the `value` field and/or select a `discord_channel`.",
+						);
+						return;
+					}
+					state.settings.SummaryChannels[primaryJid] = {
+						...existing,
+						destinations,
+					};
+					await storage.saveSettings().catch(() => {});
+					const parts = [];
+					if (destinations.whatsapp)
+						parts.push(`WhatsApp: \`${destinations.whatsapp}\``);
+					if (destinations.discord)
+						parts.push(`Discord: <#${destinations.discord}>`);
+					await ctx.reply(
+						`Summary channel linked for \`${primaryJid}\`:\n${parts.join("\n")}`,
+					);
+					break;
+				}
+				case "unlink": {
+					if (state.settings.SummaryChannels?.[primaryJid]) {
+						delete state.settings.SummaryChannels[primaryJid];
+						await storage.saveSettings().catch(() => {});
+					}
+					await ctx.reply(
+						`Summary channels unlinked for \`${primaryJid}\`.`,
+					);
+					break;
+				}
+				case "now": {
+					if (!state.settings.SummaryChannels?.[primaryJid]) {
+						await ctx.reply(
+							"No summary channel configured for this chat. Use `/summary link` first.",
+						);
+						return;
+					}
+					await ctx.reply("Generating summary...");
+					try {
+						await summaryScheduler.triggerNow(primaryJid);
+						await ctx.channel.send("Summary sent.");
+					} catch (err) {
+						state.logger?.error(err, "Manual summary failed");
+						await ctx.channel.send(
+							"Summary generation failed. Check logs.",
+						);
+					}
+					break;
+				}
+				case "config": {
+					if (!value) {
+						const config =
+							state.settings.SummaryChannels?.[primaryJid] ||
+							{};
+						const threshold =
+							config.messageThreshold ??
+							state.settings.SummaryMessageThreshold;
+						const hours =
+							config.timeThresholdHours ??
+							state.settings.SummaryTimeThresholdHours;
+						const links = state.settings.SummaryJoinLinks || {};
+						await ctx.reply(
+							`**Summary config for** \`${primaryJid}\`\n` +
+								`Message threshold: ${threshold}\n` +
+								`Time threshold: ${hours}h\n` +
+								`AI provider: ${state.settings.SummaryAIProvider}\n` +
+								`AI model: ${state.settings.SummaryAIModel}\n` +
+								`Discord link: ${links.discord || "(not set)"}\n` +
+								`WhatsApp link: ${links.whatsapp || "(not set)"}`,
+						);
+						return;
+					}
+					const [key, ...rest] = value.split("=");
+					const val = rest.join("=");
+					const settingMap = {
+						messages: "SummaryMessageThreshold",
+						hours: "SummaryTimeThresholdHours",
+						provider: "SummaryAIProvider",
+						model: "SummaryAIModel",
+						"discord-link": "SummaryJoinLinks",
+						"whatsapp-link": "SummaryJoinLinks",
+					};
+					if (key === "messages" || key === "hours") {
+						const num = Number(val);
+						if (!Number.isFinite(num) || num <= 0) {
+							await ctx.reply(
+								`Invalid value for ${key}. Must be a positive number.`,
+							);
+							return;
+						}
+						if (key === "messages") {
+							if (!state.settings.SummaryChannels[primaryJid])
+								state.settings.SummaryChannels[primaryJid] =
+									{};
+							state.settings.SummaryChannels[
+								primaryJid
+							].messageThreshold = num;
+						} else {
+							if (!state.settings.SummaryChannels[primaryJid])
+								state.settings.SummaryChannels[primaryJid] =
+									{};
+							state.settings.SummaryChannels[
+								primaryJid
+							].timeThresholdHours = num;
+						}
+					} else if (
+						key === "discord-link" ||
+						key === "whatsapp-link"
+					) {
+						if (!state.settings.SummaryJoinLinks)
+							state.settings.SummaryJoinLinks = {};
+						const linkKey = key === "discord-link"
+							? "discord"
+							: "whatsapp";
+						state.settings.SummaryJoinLinks[linkKey] = val;
+					} else if (settingMap[key]) {
+						state.settings[settingMap[key]] = val;
+					} else {
+						await ctx.reply(
+							`Unknown config key: \`${key}\`. Valid keys: messages, hours, provider, model, discord-link, whatsapp-link`,
+						);
+						return;
+					}
+					await storage.saveSettings().catch(() => {});
+					await ctx.reply(`Config updated: \`${key}\` = \`${val}\``);
+					break;
+				}
+				case "status": {
+					const config =
+						state.settings.SummaryChannels?.[primaryJid];
+					if (!config) {
+						await ctx.reply(
+							"No summary channel configured for this chat.",
+						);
+						return;
+					}
+					const count =
+						summaryBuffer.getMessageCount(primaryJid);
+					const summaryState =
+						summaryBuffer.getState(primaryJid);
+					const lastAt = summaryState?.lastSummaryAt
+						? new Date(
+								summaryState.lastSummaryAt,
+							).toISOString()
+						: "never";
+					const destinations = config.destinations || {};
+					const destParts = [];
+					if (destinations.whatsapp)
+						destParts.push(
+							`WhatsApp: \`${destinations.whatsapp}\``,
+						);
+					if (destinations.discord)
+						destParts.push(
+							`Discord: <#${destinations.discord}>`,
+						);
+					await ctx.reply(
+						`**Summary status for** \`${primaryJid}\`\n` +
+							`Enabled: ${state.settings.SummaryEnabled}\n` +
+							`Buffered messages: ${count}\n` +
+							`Last summary: ${lastAt}\n` +
+							`Destinations: ${destParts.join(", ") || "none"}`,
+					);
+					break;
+				}
+				default:
+					await ctx.reply(
+						"Unknown action. Use: enable, disable, link, unlink, now, config, status",
+					);
+			}
+		},
+	},
 	unknown: {
 		register: false,
 		async execute(ctx) {
@@ -5410,6 +5662,12 @@ client.on("messageCreate", async (message) => {
 		return;
 	}
 
+	// Check if message is in a summary-only Discord channel
+	if (summaryScheduler.isSummaryDiscordChannel(message.channel.id)) {
+		summaryScheduler.onSummaryChannelMessage("discord", message.channel.id);
+		return;
+	}
+
 	const jid = utils.discord.channelIdToJid(message.channel.id);
 	if (jid == null) {
 		return;
@@ -5422,6 +5680,21 @@ client.on("messageCreate", async (message) => {
 		message.wa2dcForwardSnapshot = snapshot;
 	}
 	state.waClient.ev.emit("discordMessage", { jid, message, forwardContext });
+
+	// Feed Discord-native messages into the summary buffer
+	summaryScheduler.onMessage({
+		channelJid: jid,
+		sender: message.member?.displayName || message.author?.username || "Unknown",
+		content: message.content || "",
+		mediaDescription: message.attachments?.size
+			? `${message.attachments.size} attachment(s)`
+			: null,
+		replyToSender: null,
+		replyToContent: null,
+		threadId: message.channel.isThread?.() ? message.channel.id : null,
+		timestamp: message.createdTimestamp,
+		discordMessageId: message.id,
+	});
 });
 
 client.on("messageUpdate", async (oldMessage, message) => {

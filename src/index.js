@@ -7,6 +7,7 @@ import discordHandler from "./discordHandler.js";
 import { isRecoverableUnhandledRejection } from "./processErrors.js";
 import state from "./state.js";
 import storage from "./storage.js";
+import summaryScheduler from "./summaryScheduler.js";
 import utils from "./utils.js";
 import whatsappHandler from "./whatsappHandler.js";
 
@@ -52,6 +53,7 @@ if (!globalThis.crypto) {
 				}
 				shuttingDown = true;
 				clearInterval(autoSaver);
+				summaryScheduler.stop();
 				if (err != null) {
 					state.logger.error(err);
 				}
@@ -227,6 +229,11 @@ if (!globalThis.crypto) {
 		);
 	} else {
 		state.logger.info("Skipping update checks for smoke test.");
+	}
+
+	if (!isSmokeTest && state.settings.SummaryEnabled) {
+		summaryScheduler.start();
+		state.logger.info("Summary scheduler started.");
 	}
 
 	state.logger.info("Bot is now running. Press CTRL-C to exit.");
