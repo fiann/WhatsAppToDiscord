@@ -14,7 +14,98 @@ const getChannelConfig = (channelJid) => {
 		timeThresholdHours:
 			perChannel?.timeThresholdHours ??
 			state.settings.SummaryTimeThresholdHours,
+		scheduleTime:
+			perChannel?.scheduleTime ??
+			state.settings.SummaryScheduleTime ??
+			null,
 	};
+};
+
+/**
+ * Get the current time in the configured timezone as { hour, minute, dateStr }.
+ */
+const getNowInTimezone = (timezone) => {
+	const tz = timezone || state.settings.SummaryTimezone || "America/Los_Angeles";
+	const now = new Date();
+	const parts = new Intl.DateTimeFormat("en-US", {
+		timeZone: tz,
+		hour: "numeric",
+		minute: "numeric",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour12: false,
+	}).formatToParts(now);
+	const get = (type) => Number(parts.find((p) => p.type === type)?.value || 0);
+	return {
+		hour: get("hour"),
+		minute: get("minute"),
+		year: get("year"),
+		month: get("month"),
+		day: get("day"),
+		timestamp: now.getTime(),
+	};
+};
+
+/**
+ * Build a Date object for a given HH:MM in the configured timezone on a
+ * specific date. Returns the UTC timestamp.
+ */
+const getTargetTimestamp = (hour, minute, year, month, day, timezone) => {
+	const tz = timezone || state.settings.SummaryTimezone || "America/Los_Angeles";
+	// Build an ISO-ish string and parse it in the target timezone
+	const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+	// Use a formatter round-trip to get the UTC equivalent
+	const guess = new Date(dateStr);
+	// Adjust by comparing the timezone offset
+	const utcStr = guess.toLocaleString("en-US", { timeZone: "UTC" });
+	const tzStr = guess.toLocaleString("en-US", { timeZone: tz });
+	const diff = new Date(utcStr).getTime() - new Date(tzStr).getTime();
+	return guess.getTime() + diff;
+};
+
+/**
+ * Check if the scheduled time of day has passed since the last summary.
+ * @param {string} scheduleTime - Time in "HH:MM" format.
+ * @param {number} lastSummaryAt - Timestamp of the last summary.
+ * @returns {boolean}
+ */
+const isScheduledTimeDue = (scheduleTime, lastSummaryAt) => {
+	const match = /^(\d{1,2}):(\d{2})$/.exec(scheduleTime);
+	if (!match) return false;
+
+	const targetHour = Number(match[1]);
+	const targetMinute = Number(match[2]);
+	const tz = state.settings.SummaryTimezone || "America/Los_Angeles";
+	const now = getNowInTimezone(tz);
+
+	const todayTarget = getTargetTimestamp(
+		targetHour, targetMinute, now.year, now.month, now.day, tz,
+	);
+
+	// If it's past the target time today and the last summary was before it
+	if (now.timestamp >= todayTarget && lastSummaryAt < todayTarget) {
+		return true;
+	}
+
+	// Also check yesterday's target in case the bot was offline
+	const yesterdayDate = new Date(now.timestamp - 24 * 60 * 60 * 1000);
+	const yd = getNowInTimezone(tz);
+	const yesterdayParts = new Intl.DateTimeFormat("en-US", {
+		timeZone: tz,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).formatToParts(yesterdayDate);
+	const yGet = (type) => Number(yesterdayParts.find((p) => p.type === type)?.value || 0);
+	const yesterdayTarget = getTargetTimestamp(
+		targetHour, targetMinute, yGet("year"), yGet("month"), yGet("day"), tz,
+	);
+	if (now.timestamp >= yesterdayTarget && lastSummaryAt < yesterdayTarget) {
+		return true;
+	}
+
+	return false;
 };
 
 const summaryBuffer = {
@@ -62,6 +153,13 @@ const summaryBuffer = {
 
 		const summaryState = sqliteStore.getSummaryState(channelJid);
 		const lastSummaryAt = summaryState?.lastSummaryAt ?? 0;
+
+		// If a specific time of day is configured, use that instead of
+		// the hours-based threshold
+		if (config.scheduleTime) {
+			return isScheduledTimeDue(config.scheduleTime, lastSummaryAt);
+		}
+
 		const elapsedMs = Date.now() - lastSummaryAt;
 		const thresholdMs = config.timeThresholdHours * 60 * 60 * 1000;
 		return elapsedMs >= thresholdMs;

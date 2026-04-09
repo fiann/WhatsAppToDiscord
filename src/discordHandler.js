@@ -5348,10 +5348,14 @@ const commandHandlers = {
 							config.timeThresholdHours ??
 							state.settings.SummaryTimeThresholdHours;
 						const links = state.settings.SummaryJoinLinks || {};
+						const schedule =
+							config.scheduleTime ||
+							state.settings.SummaryScheduleTime ||
+							null;
 						await ctx.reply(
 							`**Summary config for** \`${primaryJid}\`\n` +
+								`Schedule: ${schedule ? `daily at ${schedule} (${state.settings.SummaryTimezone})` : `every ${hours}h`}\n` +
 								`Message threshold: ${threshold}\n` +
-								`Time threshold: ${hours}h\n` +
 								`AI provider: ${state.settings.SummaryAIProvider}\n` +
 								`AI model: ${state.settings.SummaryAIModel}\n` +
 								`Discord link: ${links.discord || "(not set)"}\n` +
@@ -5369,7 +5373,30 @@ const commandHandlers = {
 						"discord-link": "SummaryJoinLinks",
 						"whatsapp-link": "SummaryJoinLinks",
 					};
-					if (key === "messages" || key === "hours") {
+					if (key === "timezone") {
+						try {
+							Intl.DateTimeFormat("en-US", { timeZone: val });
+						} catch {
+							await ctx.reply(
+								`Invalid timezone: \`${val}\`. Use IANA format (e.g. \`America/Los_Angeles\`, \`Europe/London\`).`,
+							);
+							return;
+						}
+						state.settings.SummaryTimezone = val;
+					} else if (key === "schedule") {
+						if (val && !/^\d{1,2}:\d{2}$/.test(val)) {
+							await ctx.reply(
+								"Invalid schedule time. Use HH:MM format (e.g. `08:00`) or empty to clear.",
+							);
+							return;
+						}
+						if (!state.settings.SummaryChannels[primaryJid])
+							state.settings.SummaryChannels[primaryJid] =
+								{};
+						state.settings.SummaryChannels[
+							primaryJid
+						].scheduleTime = val || null;
+					} else if (key === "messages" || key === "hours") {
 						const num = Number(val);
 						if (!Number.isFinite(num) || num <= 0) {
 							await ctx.reply(
@@ -5406,7 +5433,7 @@ const commandHandlers = {
 						state.settings[settingMap[key]] = val;
 					} else {
 						await ctx.reply(
-							`Unknown config key: \`${key}\`. Valid keys: messages, hours, provider, model, discord-link, whatsapp-link`,
+							`Unknown config key: \`${key}\`. Valid keys: schedule, timezone, messages, hours, provider, model, discord-link, whatsapp-link`,
 						);
 						return;
 					}

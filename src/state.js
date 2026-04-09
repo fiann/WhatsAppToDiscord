@@ -58,6 +58,8 @@ const state = {
 		SummaryAIModel: "claude-sonnet-4-20250514",
 		SummaryAIMaxTokens: 4096,
 		SummaryAIBaseUrl: "",
+		SummaryScheduleTime: "",
+		SummaryTimezone: "America/Los_Angeles",
 		SummaryChannels: {},
 		SummaryCheckIntervalSeconds: 60,
 		SummaryJoinLinks: { discord: "", whatsapp: "" },
