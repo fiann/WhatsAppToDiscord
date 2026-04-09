@@ -234,6 +234,7 @@ const summaryScheduler = {
 			threadId: data.threadId || null,
 			timestamp: data.timestamp || Date.now(),
 			discordMessageId: data.discordMessageId || null,
+			whatsappMessageId: data.whatsappMessageId || null,
 		});
 	},
 

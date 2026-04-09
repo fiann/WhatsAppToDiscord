@@ -255,10 +255,12 @@ const sqliteStore = {
         reply_to_content TEXT,
         thread_id TEXT,
         timestamp INTEGER NOT NULL,
-        discord_message_id TEXT
+        discord_message_id TEXT,
+        whatsapp_message_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_summary_buffer_jid ON summary_buffer(channel_jid);
       CREATE INDEX IF NOT EXISTS idx_summary_buffer_ts ON summary_buffer(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_summary_buffer_wa_id ON summary_buffer(whatsapp_message_id);
       CREATE TABLE IF NOT EXISTS summary_state (
         channel_jid TEXT PRIMARY KEY,
         message_count INTEGER NOT NULL DEFAULT 0,
@@ -266,6 +268,22 @@ const sqliteStore = {
         previous_summary TEXT
       );
     `);
+
+		// Migration: add whatsapp_message_id column if missing
+		try {
+			this._db.exec(
+				"ALTER TABLE summary_buffer ADD COLUMN whatsapp_message_id TEXT",
+			);
+		} catch {
+			// Column already exists — ignore
+		}
+		try {
+			this._db.exec(
+				"CREATE INDEX IF NOT EXISTS idx_summary_buffer_wa_id ON summary_buffer(whatsapp_message_id)",
+			);
+		} catch {
+			// Index already exists — ignore
+		}
 
 		this._configureEncryption(process.env.WA2DC_DB_PASSPHRASE || "");
 	},
@@ -462,8 +480,8 @@ const sqliteStore = {
 		this._ensureDbReady();
 		this._db
 			.prepare(`
-      INSERT INTO summary_buffer (channel_jid, sender, content, media_description, reply_to_sender, reply_to_content, thread_id, timestamp, discord_message_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO summary_buffer (channel_jid, sender, content, media_description, reply_to_sender, reply_to_content, thread_id, timestamp, discord_message_id, whatsapp_message_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 			.run(
 				channelJid,
@@ -477,7 +495,26 @@ const sqliteStore = {
 				data.threadId || null,
 				data.timestamp,
 				data.discordMessageId || null,
+				data.whatsappMessageId || null,
 			);
+	},
+
+	deleteSummaryMessageByWhatsAppId(whatsappMessageId) {
+		this._ensureDbReady();
+		this._db
+			.prepare(
+				"DELETE FROM summary_buffer WHERE whatsapp_message_id = ?",
+			)
+			.run(whatsappMessageId);
+	},
+
+	deleteSummaryMessageByDiscordId(discordMessageId) {
+		this._ensureDbReady();
+		this._db
+			.prepare(
+				"DELETE FROM summary_buffer WHERE discord_message_id = ?",
+			)
+			.run(discordMessageId);
 	},
 
 	getSummaryMessages(channelJid) {

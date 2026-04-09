@@ -93,6 +93,24 @@ const summaryBuffer = {
 	},
 
 	/**
+	 * Remove a message from the buffer by its WhatsApp message ID.
+	 * Called when a message is deleted on WhatsApp.
+	 */
+	deleteByWhatsAppId(whatsappMessageId) {
+		if (!whatsappMessageId) return;
+		sqliteStore.deleteSummaryMessageByWhatsAppId(whatsappMessageId);
+	},
+
+	/**
+	 * Remove a message from the buffer by its Discord message ID.
+	 * Called when a message is deleted on Discord.
+	 */
+	deleteByDiscordId(discordMessageId) {
+		if (!discordMessageId) return;
+		sqliteStore.deleteSummaryMessageByDiscordId(discordMessageId);
+	},
+
+	/**
 	 * Return the list of primary channel JIDs that have summary config.
 	 */
 	getConfiguredChannels() {

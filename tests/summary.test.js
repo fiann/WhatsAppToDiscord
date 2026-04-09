@@ -277,6 +277,85 @@ test("summaryAI: generateSummary returns error when no API key", async () => {
 	}
 });
 
+test("summaryBuffer: deleteByWhatsAppId removes the correct message", () => {
+	const jid = "test-delete-wa@g.us";
+	summaryBuffer.clearBuffer(jid);
+
+	summaryBuffer.addMessage(jid, {
+		sender: "Alice",
+		content: "keep this",
+		timestamp: 1000,
+		whatsappMessageId: "wa-msg-1",
+	});
+	summaryBuffer.addMessage(jid, {
+		sender: "Bob",
+		content: "delete this",
+		timestamp: 2000,
+		whatsappMessageId: "wa-msg-2",
+	});
+	summaryBuffer.addMessage(jid, {
+		sender: "Carol",
+		content: "also keep",
+		timestamp: 3000,
+		whatsappMessageId: "wa-msg-3",
+	});
+
+	assert.equal(summaryBuffer.getMessageCount(jid), 3);
+
+	summaryBuffer.deleteByWhatsAppId("wa-msg-2");
+
+	assert.equal(summaryBuffer.getMessageCount(jid), 2);
+	const remaining = summaryBuffer.getMessages(jid);
+	assert.equal(remaining[0].content, "keep this");
+	assert.equal(remaining[1].content, "also keep");
+
+	summaryBuffer.clearBuffer(jid);
+});
+
+test("summaryBuffer: deleteByDiscordId removes the correct message", () => {
+	const jid = "test-delete-dc@g.us";
+	summaryBuffer.clearBuffer(jid);
+
+	summaryBuffer.addMessage(jid, {
+		sender: "Alice",
+		content: "keep this",
+		timestamp: 1000,
+		discordMessageId: "dc-msg-1",
+	});
+	summaryBuffer.addMessage(jid, {
+		sender: "Bob",
+		content: "delete this",
+		timestamp: 2000,
+		discordMessageId: "dc-msg-2",
+	});
+
+	assert.equal(summaryBuffer.getMessageCount(jid), 2);
+
+	summaryBuffer.deleteByDiscordId("dc-msg-2");
+
+	assert.equal(summaryBuffer.getMessageCount(jid), 1);
+	const remaining = summaryBuffer.getMessages(jid);
+	assert.equal(remaining[0].content, "keep this");
+
+	summaryBuffer.clearBuffer(jid);
+});
+
+test("summaryBuffer: deleteByWhatsAppId with null is a no-op", () => {
+	const jid = "test-delete-null@g.us";
+	summaryBuffer.clearBuffer(jid);
+
+	summaryBuffer.addMessage(jid, {
+		sender: "Alice",
+		content: "test",
+		timestamp: 1000,
+	});
+
+	summaryBuffer.deleteByWhatsAppId(null);
+	assert.equal(summaryBuffer.getMessageCount(jid), 1);
+
+	summaryBuffer.clearBuffer(jid);
+});
+
 // --- summaryScheduler tests ---
 
 test("summaryScheduler: onMessage does nothing when disabled", () => {

@@ -1322,6 +1322,7 @@ client.on("whatsappMessage", async (message) => {
 		threadId: null,
 		timestamp: Date.now(),
 		discordMessageId: null,
+		whatsappMessageId: message.id || null,
 	});
 
 	if (!allowsWhatsAppToDiscord()) {
@@ -1555,6 +1556,9 @@ client.on("whatsappRead", async ({ id, jid }) => {
 });
 
 client.on("whatsappDelete", async ({ id, jid }) => {
+	// Remove deleted messages from the summary buffer
+	summaryBuffer.deleteByWhatsAppId(id);
+
 	if (!state.settings.DeleteMessages || !allowsWhatsAppToDiscord()) {
 		return;
 	}
@@ -5858,6 +5862,9 @@ client.on("messageDelete", async (message) => {
 		discordForwardContextTimers,
 		message?.id,
 	);
+
+	// Remove deleted messages from the summary buffer
+	summaryBuffer.deleteByDiscordId(message.id);
 
 	const jid = utils.discord.channelIdToJid(message.channelId);
 	if (jid == null) {
