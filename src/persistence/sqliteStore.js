@@ -255,12 +255,10 @@ const sqliteStore = {
         reply_to_content TEXT,
         thread_id TEXT,
         timestamp INTEGER NOT NULL,
-        discord_message_id TEXT,
-        whatsapp_message_id TEXT
+        discord_message_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_summary_buffer_jid ON summary_buffer(channel_jid);
       CREATE INDEX IF NOT EXISTS idx_summary_buffer_ts ON summary_buffer(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_summary_buffer_wa_id ON summary_buffer(whatsapp_message_id);
       CREATE TABLE IF NOT EXISTS summary_state (
         channel_jid TEXT PRIMARY KEY,
         message_count INTEGER NOT NULL DEFAULT 0,
