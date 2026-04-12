@@ -117,7 +117,7 @@ const splitMessage = (text, limit) => {
 /**
  * Process a single channel: generate and deliver summary.
  */
-const processChannel = async (primaryJid) => {
+const processChannel = async (primaryJid, triggerReason = "manual") => {
 	const config = state.settings.SummaryChannels?.[primaryJid];
 	if (!config?.destinations) return;
 
@@ -142,8 +142,21 @@ const processChannel = async (primaryJid) => {
 		return;
 	}
 
+	// Build title line with channel name and date
+	const channelName =
+		utils.whatsapp.jidToName(primaryJid) || primaryJid;
+	const tz = state.settings.SummaryTimezone || "America/Los_Angeles";
+	const dateStr = new Date().toLocaleDateString("en-US", {
+		timeZone: tz,
+		day: "numeric",
+		month: "long",
+		year: "numeric",
+	});
+	const summaryType = triggerReason === "schedule" ? "Daily summary" : "Summary continuation";
+	const title = `${summaryType} of #${channelName} for ${dateStr}`;
+
 	const footer = buildFooter();
-	const fullSummary = summary + footer;
+	const fullSummary = title + "\n" + summary + footer;
 
 	// Send to configured destinations
 	const deliveries = [];
@@ -174,9 +187,10 @@ const tick = async () => {
 
 	const channels = summaryBuffer.getConfiguredChannels();
 	for (const jid of channels) {
-		if (summaryBuffer.shouldTrigger(jid)) {
+		const reason = summaryBuffer.getTriggerReason(jid);
+		if (reason) {
 			try {
-				await processChannel(jid);
+				await processChannel(jid, reason);
 			} catch (err) {
 				state.logger?.error(
 					{ err, jid },

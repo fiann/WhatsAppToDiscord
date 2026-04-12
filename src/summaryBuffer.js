@@ -144,25 +144,35 @@ const summaryBuffer = {
 	 * Check whether the summary should be triggered for a channel based on
 	 * message count or elapsed time since the last summary.
 	 */
-	shouldTrigger(channelJid) {
+	/**
+	 * Check whether the summary should be triggered and return the reason.
+	 * Returns null if not triggered, or one of: "schedule", "count", "time".
+	 */
+	getTriggerReason(channelJid) {
 		const config = getChannelConfig(channelJid);
 		const count = this.getMessageCount(channelJid);
-		if (count === 0) return false;
-
-		if (count >= config.messageThreshold) return true;
+		if (count === 0) return null;
 
 		const summaryState = sqliteStore.getSummaryState(channelJid);
 		const lastSummaryAt = summaryState?.lastSummaryAt ?? 0;
 
-		// If a specific time of day is configured, use that instead of
-		// the hours-based threshold
-		if (config.scheduleTime) {
-			return isScheduledTimeDue(config.scheduleTime, lastSummaryAt);
+		if (config.scheduleTime && isScheduledTimeDue(config.scheduleTime, lastSummaryAt)) {
+			return "schedule";
 		}
 
-		const elapsedMs = Date.now() - lastSummaryAt;
-		const thresholdMs = config.timeThresholdHours * 60 * 60 * 1000;
-		return elapsedMs >= thresholdMs;
+		if (count >= config.messageThreshold) return "count";
+
+		if (!config.scheduleTime) {
+			const elapsedMs = Date.now() - lastSummaryAt;
+			const thresholdMs = config.timeThresholdHours * 60 * 60 * 1000;
+			if (elapsedMs >= thresholdMs) return "time";
+		}
+
+		return null;
+	},
+
+	shouldTrigger(channelJid) {
+		return this.getTriggerReason(channelJid) !== null;
 	},
 
 	/**

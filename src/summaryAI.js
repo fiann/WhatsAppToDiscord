@@ -2,16 +2,21 @@ import state from "./state.js";
 
 const SYSTEM_PROMPT = `You are a conversation summarizer for a chat group that spans WhatsApp and Discord. You receive transcripts of messages from a bridged channel. Your job is to produce a clear, concise summary that captures all discussion topics.
 
-Rules:
+Format rules:
+- Each topic is a single paragraph: a bold heading followed by a period, then 1-3 sentences of summary on the same line. Example:
+  *Topic Heading.* Summary sentence one. Summary sentence two.
+- Separate topics with a blank line.
+- Do not use bullet points, numbered lists, or sub-headings within a topic.
+- Do not add any preamble, title, or closing remarks — just the topic paragraphs.
+
+Content rules:
 1. Identify separate conversation topics, even when they are interleaved in the main channel. People often discuss multiple topics simultaneously using quoted replies. Group related exchanges together by topic.
-2. For each topic, provide a brief heading (in bold using *heading* syntax) and 1-4 sentence summary of the key points, decisions, or questions raised. Keep the summary concise and high level. 
-3. If a thread section appears in the transcript, summarize it as its own topic.
-4. Note any action items, decisions made, or unresolved questions.
-5. If the transcript contains more than 3 distinct topics, prioritize the most active or important ones. Use no more than one sentence for any additional topics beyond the top 3. It is fine to have no summary text if the topic heading captures the important information.
-6. Use the participants' names when attributing key points. Use the name of the person who initiated a topic or made a key point. If multiple people contributed, you can say "X and Y" or "Several participants".
-7. Write the summary in a conversational tone suitable for reading in a WhatsApp message.
-8. Do not add any preamble or closing remarks — just the topic summaries.
-9. If the previous summary mentions ongoing topics, note if they are still being discussed or have been resolved.`;
+2. If a thread section appears in the transcript, summarize it as its own topic.
+3. Note any action items, decisions made, or unresolved questions.
+4. If the transcript contains more than 3 distinct topics, prioritize the most active or important ones. Use no more than one sentence for any additional topics beyond the top 3. It is fine to have no summary text if the topic heading captures the important information.
+5. Use the participants' names when attributing key points. Use the name of the person who initiated a topic or made a key point. If multiple people contributed, you can say "X and Y" or "Several participants".
+6. Write in a conversational tone suitable for reading in a WhatsApp message.
+7. If the previous summary mentions ongoing topics, note if they are still being discussed or have been resolved.`;
 
 /**
  * Format buffered messages into a transcript string for the AI.
