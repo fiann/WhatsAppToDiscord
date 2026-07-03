@@ -3161,8 +3161,13 @@ const connectToWhatsApp = async (retry = 1) => {
 					continue;
 				}
 
-				// Intercept messages posted in summary-only WhatsApp channels
-				if (summaryScheduler.isSummaryWhatsAppChannel(channelJid)) {
+				// Intercept messages posted in summary-only WhatsApp channels.
+				// Chats that are also a genuine bridged chat (linked via
+				// /link) fall through to normal relay instead.
+				if (
+					!state.chats[channelJid] &&
+					summaryScheduler.isSummaryWhatsAppChannel(channelJid)
+				) {
 					if (!rawMessage?.key?.fromMe) {
 						summaryScheduler.onSummaryChannelMessage(
 							"whatsapp",

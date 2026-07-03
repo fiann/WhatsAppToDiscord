@@ -5708,13 +5708,15 @@ client.on("messageCreate", async (message) => {
 		return;
 	}
 
-	// Check if message is in a summary-only Discord channel
-	if (summaryScheduler.isSummaryDiscordChannel(message.channel.id)) {
+	const jid = utils.discord.channelIdToJid(message.channel.id);
+
+	// Check if message is in a summary-only Discord channel. Channels that
+	// are also a genuine bridged chat (linked via /link) fall through to
+	// normal relay instead — they're not read-only broadcast channels.
+	if (!jid && summaryScheduler.isSummaryDiscordChannel(message.channel.id)) {
 		summaryScheduler.onSummaryChannelMessage("discord", message.channel.id);
 		return;
 	}
-
-	const jid = utils.discord.channelIdToJid(message.channel.id);
 	if (jid == null) {
 		return;
 	}
