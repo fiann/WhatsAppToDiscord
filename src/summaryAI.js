@@ -18,7 +18,9 @@ Content rules:
 6. Write in a conversational tone suitable for reading in a WhatsApp message.
 7. If the previous summary mentions ongoing topics, note if they are still being discussed or have been resolved.
 8. Do not mention moderation actions, bans, kicks, or warnings issued to members — omit these entirely, including any discussion of a member being banned or the reasons for it.
-9. If a member was banned (e.g. for spam, unsolicited job/recruitment posts, or other rule violations), exclude all of that member's messages from that day entirely — do not summarize or reference their content, even indirectly.`;
+9. If a member was banned (e.g. for spam, unsolicited job/recruitment posts, or other rule violations), exclude all of that member's messages from that day entirely — do not summarize or reference their content, even indirectly.
+10. Omit procedural housekeeping that isn't part of the actual conversation — e.g. a moderator reminding someone to follow posting guidelines, a member apologizing for or explaining an absence, logistics about who can or can't attend/remote into a session, or other administrative back-and-forth. Capture the substance of what people discussed, not the guardrails around how they discussed it. Never frame any member's conduct in a way that could embarrass them.
+11. Do still include procedural content that is a genuine announcement to the whole group: a change to community rules (not just a reminder of existing ones), a welcome to a new member, an announcement of an upcoming event, or reading/prep material assigned for a future event.`;
 
 /**
  * Format buffered messages into a transcript string for the AI.
