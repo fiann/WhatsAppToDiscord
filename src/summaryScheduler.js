@@ -307,7 +307,7 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
 		year: "numeric",
 	});
 	const summaryType = triggerReason === "schedule" ? "Daily summary" : "Summary continuation";
-	const title = `${summaryType} of #${channelName} for ${dateStr}`;
+	const title = `✨ **${summaryType} of #${channelName} for ${dateStr}**`;
 
 	const footer = buildFooter();
 	const fullSummary = title + "\n" + summary + footer;
