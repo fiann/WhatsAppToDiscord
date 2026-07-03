@@ -1,9 +1,14 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import state from "./state.js";
 import summaryAI from "./summaryAI.js";
 import summaryBuffer from "./summaryBuffer.js";
 import utils from "./utils.js";
 
 let intervalId = null;
+let backfillRunning = false;
+const BACKFILL_QUEUE_PATH = path.join("./storage", "backfill-queue.json");
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Tracks the last time a redirect reply was sent per summary channel. */
 const redirectTimestamps = new Map();
@@ -115,6 +120,70 @@ const splitMessage = (text, limit) => {
 };
 
 /**
+ * Process a one-off backfill queue file (./storage/backfill-queue.json), if
+ * present. Used to post pre-approved, pre-generated summaries (e.g. after a
+ * manual review) using the already-connected clients, spaced out by delayMs.
+ * Format: { primaryJid, delayMs, entries: [{ title, summary }] }.
+ */
+const processBackfillQueue = async () => {
+	if (backfillRunning) return;
+
+	let raw;
+	try {
+		raw = await fs.readFile(BACKFILL_QUEUE_PATH, "utf8");
+	} catch {
+		return;
+	}
+
+	backfillRunning = true;
+	try {
+		const queue = JSON.parse(raw);
+		const { primaryJid, entries, delayMs = 8000 } = queue;
+		const config = state.settings.SummaryChannels?.[primaryJid];
+		if (!config?.destinations || !entries?.length) {
+			state.logger?.warn(
+				{ primaryJid },
+				"Backfill queue: no destinations or entries, skipping",
+			);
+			return;
+		}
+
+		state.logger?.info(
+			{ primaryJid, count: entries.length },
+			"Processing summary backfill queue",
+		);
+
+		for (const entry of entries) {
+			const fullText = `${entry.title}\n${entry.summary}`;
+			const deliveries = [];
+			if (config.destinations.whatsapp) {
+				deliveries.push(
+					sendToWhatsApp(config.destinations.whatsapp, fullText),
+				);
+			}
+			if (config.destinations.discord) {
+				deliveries.push(
+					sendToDiscord(config.destinations.discord, fullText),
+				);
+			}
+			await Promise.allSettled(deliveries);
+			state.logger?.info(
+				{ primaryJid, title: entry.title },
+				"Backfill entry delivered",
+			);
+			await sleep(delayMs);
+		}
+
+		state.logger?.info({ primaryJid }, "Summary backfill queue complete");
+	} catch (err) {
+		state.logger?.error({ err }, "Summary backfill queue processing failed");
+	} finally {
+		await fs.unlink(BACKFILL_QUEUE_PATH).catch(() => {});
+		backfillRunning = false;
+	}
+};
+
+/**
  * Process a single channel: generate and deliver summary.
  */
 const processChannel = async (primaryJid, triggerReason = "manual") => {
@@ -184,6 +253,10 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
  */
 const tick = async () => {
 	if (!state.settings.SummaryEnabled) return;
+
+	processBackfillQueue().catch((err) =>
+		state.logger?.error({ err }, "Backfill queue tick failed"),
+	);
 
 	const channels = summaryBuffer.getConfiguredChannels();
 	for (const jid of channels) {

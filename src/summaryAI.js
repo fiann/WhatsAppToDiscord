@@ -16,7 +16,9 @@ Content rules:
 4. If the transcript contains more than 3 distinct topics, prioritize the most active or important ones. Use no more than one sentence for any additional topics beyond the top 3. It is fine to have no summary text if the topic heading captures the important information.
 5. Use the participants' names when attributing key points. Use the name of the person who initiated a topic or made a key point. If multiple people contributed, you can say "X and Y" or "Several participants".
 6. Write in a conversational tone suitable for reading in a WhatsApp message.
-7. If the previous summary mentions ongoing topics, note if they are still being discussed or have been resolved.`;
+7. If the previous summary mentions ongoing topics, note if they are still being discussed or have been resolved.
+8. Do not mention moderation actions, bans, kicks, or warnings issued to members — omit these entirely, including any discussion of a member being banned or the reasons for it.
+9. If a member was banned (e.g. for spam, unsolicited job/recruitment posts, or other rule violations), exclude all of that member's messages from that day entirely — do not summarize or reference their content, even indirectly.`;
 
 /**
  * Format buffered messages into a transcript string for the AI.
