@@ -269,7 +269,32 @@ const processBackfillQueue = async () => {
 };
 
 /**
- * Process a single channel: generate and deliver summary.
+ * Group buffered messages into calendar-day buckets in the given timezone,
+ * so a multi-day gap (e.g. the bot was down) produces one summary per day
+ * instead of a single summary spanning the whole gap.
+ */
+const groupMessagesByDay = (messages, timezone) => {
+	const dayFormatter = new Intl.DateTimeFormat("en-CA", {
+		timeZone: timezone,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	});
+	const byDay = new Map();
+	for (const message of messages) {
+		const dayKey = dayFormatter.format(new Date(message.timestamp));
+		if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+		byDay.get(dayKey).push(message);
+	}
+	return [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b));
+};
+
+/**
+ * Process a single channel: generate and deliver one summary per calendar
+ * day represented in the buffer. In normal operation this is just today's
+ * messages (identical to the old single-summary behavior). After an outage
+ * spanning multiple days, this naturally produces a proper day-by-day
+ * backfill instead of one summary lumping the whole gap together.
  */
 const processChannel = async (primaryJid, triggerReason = "manual") => {
 	const config = state.settings.SummaryChannels?.[primaryJid];
@@ -278,59 +303,77 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
 	const messages = summaryBuffer.getMessages(primaryJid);
 	if (messages.length === 0) return;
 
-	const summaryState = summaryBuffer.getState(primaryJid);
-	const previousSummary = summaryState?.previousSummary || null;
-
-	state.logger?.info(
-		{ primaryJid, messageCount: messages.length },
-		"Generating summary",
-	);
-
-	const { summary, error } = await summaryAI.generateSummary(
-		messages,
-		previousSummary,
-	);
-
-	if (error) {
-		state.logger?.error({ primaryJid, error }, "Summary generation failed");
-		return;
-	}
-
-	// Build title line with channel name and date
-	const channelName =
-		utils.whatsapp.jidToName(primaryJid) || primaryJid;
 	const tz = state.settings.SummaryTimezone || "America/Los_Angeles";
-	const dateStr = new Date().toLocaleDateString("en-US", {
-		timeZone: tz,
-		day: "numeric",
-		month: "long",
-		year: "numeric",
-	});
-	const summaryType = triggerReason === "schedule" ? "Daily summary" : "Summary continuation";
-	const title = `✨ **${summaryType} of #${channelName} for ${dateStr}**`;
-
+	const dayBuckets = groupMessagesByDay(messages, tz);
+	const isMultiDayCatchUp = dayBuckets.length > 1;
+	const channelName = utils.whatsapp.jidToName(primaryJid) || primaryJid;
 	const footer = buildFooter();
-	const fullSummary = title + "\n" + summary + footer;
 
-	// Send to configured destinations
-	const deliveries = [];
-	if (config.destinations.whatsapp) {
-		deliveries.push(
-			sendToWhatsApp(config.destinations.whatsapp, fullSummary),
-		);
-	}
-	if (config.destinations.discord) {
-		deliveries.push(
-			sendToDiscord(config.destinations.discord, fullSummary),
-		);
-	}
-	await Promise.allSettled(deliveries);
+	let previousSummary =
+		summaryBuffer.getState(primaryJid)?.previousSummary || null;
+	let lastGoodSummary = previousSummary;
+	let deliveredAny = false;
 
-	// Update state and clear buffer
-	summaryBuffer.setPreviousSummary(primaryJid, summary);
+	for (const [dayKey, dayMessages] of dayBuckets) {
+		state.logger?.info(
+			{ primaryJid, dayKey, messageCount: dayMessages.length },
+			"Generating summary",
+		);
+
+		const { summary, error } = await summaryAI.generateSummary(
+			dayMessages,
+			previousSummary,
+		);
+
+		if (error) {
+			state.logger?.error(
+				{ primaryJid, dayKey, error },
+				"Summary generation failed for this day, skipping",
+			);
+			continue;
+		}
+
+		const dateStr = new Date(`${dayKey}T12:00:00Z`).toLocaleDateString(
+			"en-US",
+			{ timeZone: "UTC", day: "numeric", month: "long", year: "numeric" },
+		);
+		const summaryType =
+			triggerReason === "schedule" || isMultiDayCatchUp
+				? "Daily summary"
+				: "Summary continuation";
+		const recoveredTag = isMultiDayCatchUp ? " [recovered]" : "";
+		const title = `✨ **${summaryType} of #${channelName} for ${dateStr}${recoveredTag}**`;
+		const fullSummary = title + "\n" + summary + footer;
+
+		const deliveries = [];
+		if (config.destinations.whatsapp) {
+			deliveries.push(
+				sendToWhatsApp(config.destinations.whatsapp, fullSummary),
+			);
+		}
+		if (config.destinations.discord) {
+			deliveries.push(
+				sendToDiscord(config.destinations.discord, fullSummary),
+			);
+		}
+		await Promise.allSettled(deliveries);
+
+		state.logger?.info({ primaryJid, dayKey }, "Summary delivered successfully");
+		previousSummary = summary;
+		lastGoodSummary = summary;
+		deliveredAny = true;
+
+		if (isMultiDayCatchUp) await sleep(8000);
+	}
+
+	if (!deliveredAny) return;
+
+	// Update state and clear buffer once the whole catch-up run is done.
+	// Days that failed after retries are logged above rather than retried
+	// indefinitely — matches how a human would handle a single bad day
+	// during a manual backfill.
+	summaryBuffer.setPreviousSummary(primaryJid, lastGoodSummary);
 	summaryBuffer.clearBuffer(primaryJid);
-
-	state.logger?.info({ primaryJid }, "Summary delivered successfully");
 };
 
 /**
