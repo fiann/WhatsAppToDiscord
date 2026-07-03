@@ -47,6 +47,12 @@ import utils from "./utils.js";
 let authState;
 let saveState;
 let groupCachePruneInterval = null;
+// Tracks whether we've already posted a "connection down" alert for the
+// current outage, so we only post a "restored" message when there was
+// something to restore from — and so brief, self-recovering blips (which
+// reconnect on the very first attempt) don't post anything at all.
+let notifiedConnectionDown = false;
+const RECONNECT_NOTIFY_THRESHOLD = 3;
 const allowsDiscordToWhatsApp = () =>
 	oneWayAllowsDiscordToWhatsApp(state.settings.oneWay);
 const allowsWhatsAppToDiscord = () =>
@@ -2960,15 +2966,24 @@ const connectToWhatsApp = async (retry = 1) => {
 				}
 				const delayMs = getReconnectDelayMs(retry);
 				const humanReason = formatDisconnectReason(statusCode);
+				// Only alert once an outage has persisted through a few
+				// attempts — a single blip that reconnects immediately
+				// (the common case) shouldn't page anyone.
+				const shouldNotify = retry >= RECONNECT_NOTIFY_THRESHOLD;
+				if (shouldNotify) notifiedConnectionDown = true;
 				if (delayMs === 0) {
-					await sendControlMessage(
-						`WhatsApp connection failed (${humanReason}). Trying to reconnect! Retry #${retry}`,
-					);
+					if (shouldNotify) {
+						await sendControlMessage(
+							`WhatsApp connection failed (${humanReason}). Trying to reconnect! Retry #${retry}`,
+						);
+					}
 				} else {
 					const delaySeconds = Math.round(delayMs / 1000);
-					await sendControlMessage(
-						`WhatsApp connection failed (${humanReason}). Waiting ${delaySeconds} seconds before trying to reconnect! Retry #${retry}.`,
-					);
+					if (shouldNotify) {
+						await sendControlMessage(
+							`WhatsApp connection failed (${humanReason}). Waiting ${delaySeconds} seconds before trying to reconnect! Retry #${retry}.`,
+						);
+					}
 					await sleep(delayMs);
 				}
 				if (!state.shutdownRequested) {
@@ -2979,8 +2994,14 @@ const connectToWhatsApp = async (retry = 1) => {
 				state.waClient = client;
 				state.pendingQR = null;
 
+				if (notifiedConnectionDown) {
+					await sendControlMessage(
+						`WhatsApp connection restored (after ${retry} failed attempt${retry === 1 ? "" : "s"}).`,
+					);
+					notifiedConnectionDown = false;
+				}
+
 				retry = 1;
-				await sendControlMessage("WhatsApp connection successfully opened!");
 
 				try {
 					const groups = await client.groupFetchAllParticipating();

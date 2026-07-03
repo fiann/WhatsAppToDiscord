@@ -10,6 +10,20 @@ let backfillRunning = false;
 const BACKFILL_QUEUE_PATH = path.join("./storage", "backfill-queue.json");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Post an alert to the control room for a summary pipeline failure that
+ * needs a human's attention — as opposed to routine connectivity blips,
+ * which are throttled separately in whatsappHandler.js.
+ */
+const notifyControlRoom = async (message) => {
+	try {
+		const channel = await utils.discord.getControlChannel();
+		await channel?.send(`⚠️ Summary pipeline: ${message}`);
+	} catch (err) {
+		state.logger?.debug?.({ err }, "Failed to post summary alert to control room");
+	}
+};
+
 /** Tracks the last time a redirect reply was sent per summary channel. */
 const redirectTimestamps = new Map();
 
@@ -104,6 +118,9 @@ const sendToWhatsApp = async (jid, text) => {
 				{ jid },
 				"Cannot send to WhatsApp: this group only allows admins to post, and the bot account is not an admin there",
 			);
+			await notifyControlRoom(
+				`couldn't post to WhatsApp (${jid}) — the group only allows admins to send, and the bot isn't one there.`,
+			);
 			return false;
 		}
 		await state.waClient.sendMessage(jid, { text });
@@ -112,6 +129,9 @@ const sendToWhatsApp = async (jid, text) => {
 		state.logger?.error(
 			{ err, jid },
 			"Failed to send summary to WhatsApp",
+		);
+		await notifyControlRoom(
+			`failed to post to WhatsApp (${jid}): ${err.message}`,
 		);
 		return false;
 	}
@@ -129,6 +149,9 @@ const sendToDiscord = async (channelId, text) => {
 				{ channelId },
 				"Summary Discord channel not found",
 			);
+			await notifyControlRoom(
+				`couldn't post — Discord channel ${channelId} not found.`,
+			);
 			return false;
 		}
 		// Split long messages for Discord's 2000 char limit
@@ -141,6 +164,9 @@ const sendToDiscord = async (channelId, text) => {
 		state.logger?.error(
 			{ err, channelId },
 			"Failed to send summary to Discord",
+		);
+		await notifyControlRoom(
+			`failed to post to Discord channel ${channelId}: ${err.message}`,
 		);
 		return false;
 	}
@@ -329,6 +355,9 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
 			state.logger?.error(
 				{ primaryJid, dayKey, error },
 				"Summary generation failed for this day, skipping",
+			);
+			await notifyControlRoom(
+				`generation failed for #${channelName} on ${dayKey}: ${error}`,
 			);
 			continue;
 		}
