@@ -139,6 +139,25 @@ const providers = {
   },
 };
 
+/**
+ * Basic sanity check to catch a degenerate model response (echoed prompt
+ * scaffolding, leaked raw transcript lines, runaway repetition) before it
+ * ever gets posted to a real channel. Seen in practice on transcripts
+ * containing moderation/guideline-enforcement exchanges, which can send the
+ * model into a hallucinated "continuation" instead of a summary.
+ */
+const looksDegenerate = (text) => {
+  if (!text) return true;
+  if (text.includes("===")) return true;
+  if (/\[\d{1,2}:\d{2}\]/.test(text)) return true;
+  if (/^>\s/m.test(text)) return true;
+  if (text.length > 3000) return true;
+  const lines = text.split("\n").filter(Boolean);
+  const dupeCount = lines.length - new Set(lines).size;
+  if (lines.length > 5 && dupeCount / lines.length > 0.3) return true;
+  return false;
+};
+
 const summaryAI = {
   /**
    * Generate a summary from buffered messages.
@@ -174,7 +193,17 @@ const summaryAI = {
       baseUrl: config.baseUrl || state.settings.SummaryAIBaseUrl || "",
     };
 
-    return provider(userPrompt, providerConfig);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const result = await provider(userPrompt, providerConfig);
+      if (result.error) return result;
+      if (!looksDegenerate(result.summary)) return result;
+      state.logger?.warn(
+        { attempt },
+        "Summary generation looked degenerate, retrying",
+      );
+    }
+
+    return { error: "Summary generation produced degenerate output after retries" };
   },
 
   /** Exposed for testing. */
