@@ -60,17 +60,60 @@ const buildFooter = () => {
 };
 
 /**
+ * Check whether the bot's own WhatsApp account is allowed to post in a
+ * group. Returns true for non-group JIDs, groups that aren't admin-only,
+ * or if the check itself fails (so we don't block sends on a metadata
+ * hiccup — the send attempt below will surface a real error instead).
+ */
+const canSendToWhatsAppGroup = async (jid) => {
+	if (!jid?.endsWith("@g.us") || !state.waClient) return true;
+	try {
+		const metadata = await state.waClient.groupMetadata(jid);
+		if (!metadata?.announce) return true;
+		const ownJid = state.waClient.user?.id;
+		const ownNumber = ownJid?.split(":")[0]?.split("@")[0];
+		const isAdmin = metadata.participants?.some((p) => {
+			const pNumber = p.id?.split(":")[0]?.split("@")[0];
+			return (
+				(p.id === ownJid || (pNumber && pNumber === ownNumber)) &&
+				(p.admin === "admin" || p.admin === "superadmin")
+			);
+		});
+		return !!isAdmin;
+	} catch (err) {
+		state.logger?.warn(
+			{ err, jid },
+			"Could not verify WhatsApp group send permission, attempting send anyway",
+		);
+		return true;
+	}
+};
+
+/**
  * Send a summary to the configured WhatsApp destination.
+ * Returns true on confirmed send, false otherwise (Baileys does not always
+ * throw when a group rejects the message server-side, e.g. admin-only
+ * groups where the bot isn't an admin — so we check permission up front).
  */
 const sendToWhatsApp = async (jid, text) => {
-	if (!state.waClient) return;
+	if (!state.waClient) return false;
 	try {
+		const allowed = await canSendToWhatsAppGroup(jid);
+		if (!allowed) {
+			state.logger?.error(
+				{ jid },
+				"Cannot send to WhatsApp: this group only allows admins to post, and the bot account is not an admin there",
+			);
+			return false;
+		}
 		await state.waClient.sendMessage(jid, { text });
+		return true;
 	} catch (err) {
 		state.logger?.error(
 			{ err, jid },
 			"Failed to send summary to WhatsApp",
 		);
+		return false;
 	}
 };
 
@@ -78,7 +121,7 @@ const sendToWhatsApp = async (jid, text) => {
  * Send a summary to the configured Discord channel.
  */
 const sendToDiscord = async (channelId, text) => {
-	if (!state.dcClient) return;
+	if (!state.dcClient) return false;
 	try {
 		const channel = await utils.discord.getChannel(channelId);
 		if (!channel) {
@@ -86,18 +129,20 @@ const sendToDiscord = async (channelId, text) => {
 				{ channelId },
 				"Summary Discord channel not found",
 			);
-			return;
+			return false;
 		}
 		// Split long messages for Discord's 2000 char limit
 		const chunks = splitMessage(text, 2000);
 		for (const chunk of chunks) {
 			await channel.send(chunk);
 		}
+		return true;
 	} catch (err) {
 		state.logger?.error(
 			{ err, channelId },
 			"Failed to send summary to Discord",
 		);
+		return false;
 	}
 };
 
@@ -153,28 +198,68 @@ const processBackfillQueue = async () => {
 			"Processing summary backfill queue",
 		);
 
+		let whatsappBroken = false;
+		const failures = [];
+
 		for (const entry of entries) {
 			const fullText = `${entry.title}\n${entry.summary}`;
-			const deliveries = [];
-			if (config.destinations.whatsapp) {
-				deliveries.push(
-					sendToWhatsApp(config.destinations.whatsapp, fullText),
-				);
-			}
+			const entryFailures = [];
+
 			if (config.destinations.discord) {
-				deliveries.push(
-					sendToDiscord(config.destinations.discord, fullText),
+				const ok = await sendToDiscord(
+					config.destinations.discord,
+					fullText,
+				);
+				if (!ok) entryFailures.push("discord");
+			}
+
+			if (config.destinations.whatsapp && !whatsappBroken) {
+				const ok = await sendToWhatsApp(
+					config.destinations.whatsapp,
+					fullText,
+				);
+				if (!ok) {
+					entryFailures.push("whatsapp");
+					// Group permission issues won't clear up mid-run — stop
+					// hammering WhatsApp for the rest of this queue, but keep
+					// posting to Discord for the remaining entries.
+					whatsappBroken = true;
+				}
+			} else if (config.destinations.whatsapp && whatsappBroken) {
+				entryFailures.push("whatsapp");
+			}
+
+			if (entryFailures.length) {
+				failures.push({ ...entry, failedPlatforms: entryFailures });
+				state.logger?.error(
+					{ primaryJid, title: entry.title, failed: entryFailures },
+					"Backfill entry partially or fully failed",
+				);
+			} else {
+				state.logger?.info(
+					{ primaryJid, title: entry.title },
+					"Backfill entry delivered",
 				);
 			}
-			await Promise.allSettled(deliveries);
-			state.logger?.info(
-				{ primaryJid, title: entry.title },
-				"Backfill entry delivered",
-			);
 			await sleep(delayMs);
 		}
 
-		state.logger?.info({ primaryJid }, "Summary backfill queue complete");
+		if (failures.length) {
+			const failurePath = BACKFILL_QUEUE_PATH.replace(
+				".json",
+				"-failures.json",
+			);
+			await fs.writeFile(
+				failurePath,
+				JSON.stringify({ primaryJid, delayMs, entries: failures }, null, 2),
+			);
+			state.logger?.error(
+				{ primaryJid, count: failures.length, failurePath },
+				"Summary backfill queue finished with failures — see failures file",
+			);
+		} else {
+			state.logger?.info({ primaryJid }, "Summary backfill queue complete");
+		}
 	} catch (err) {
 		state.logger?.error({ err }, "Summary backfill queue processing failed");
 	} finally {
