@@ -96,7 +96,7 @@ const providers = {
     }
 
     const baseUrl = config.baseUrl || "https://api.anthropic.com";
-    const model = config.model || "claude-sonnet-4-20250514";
+    const model = config.model || "claude-sonnet-5";
     const maxTokens = config.maxTokens || 4096;
 
     try {
@@ -123,7 +123,7 @@ const providers = {
       }
 
       const data = await response.json();
-      const text = data?.content?.[0]?.text;
+      const text = data?.content?.find((block) => block.type === "text")?.text;
       if (!text) {
         return { error: "Claude API returned empty response" };
       }

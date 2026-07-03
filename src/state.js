@@ -55,7 +55,7 @@ const state = {
 		SummaryMessageThreshold: 100,
 		SummaryTimeThresholdHours: 24,
 		SummaryAIProvider: "claude",
-		SummaryAIModel: "claude-sonnet-4-20250514",
+		SummaryAIModel: "claude-sonnet-5",
 		SummaryAIMaxTokens: 4096,
 		SummaryAIBaseUrl: "",
 		SummaryScheduleTime: "",
