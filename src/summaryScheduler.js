@@ -122,20 +122,24 @@ const buildFooter = () => {
  * or if the check itself fails (so we don't block sends on a metadata
  * hiccup — the send attempt below will surface a real error instead).
  */
+const bareId = (jid) => jid?.split(":")[0]?.split("@")[0];
+
 const canSendToWhatsAppGroup = async (jid) => {
 	if (!jid?.endsWith("@g.us") || !state.waClient) return true;
 	try {
 		const metadata = await state.waClient.groupMetadata(jid);
 		if (!metadata?.announce) return true;
-		const ownJid = state.waClient.user?.id;
-		const ownLid = state.waClient.user?.lid;
-		const ownNumber = ownJid?.split(":")[0]?.split("@")[0];
+		const ownNumber = bareId(state.waClient.user?.id);
+		const ownLidNumber = bareId(state.waClient.user?.lid);
 		const isAdmin = metadata.participants?.some((p) => {
-			const pNumber = p.id?.split(":")[0]?.split("@")[0];
+			// Groups using LID addressing give each participant an "id" in
+			// @lid form and the actual phone-number JID in a separate
+			// "phoneNumber" field — neither carries a device suffix, unlike
+			// our own client's ownJid/ownLid, so compare bare numbers only.
+			const matchesNumber = bareId(p.phoneNumber) === ownNumber;
+			const matchesLid = bareId(p.id) === ownLidNumber;
 			return (
-				(p.id === ownJid ||
-					p.id === ownLid ||
-					(pNumber && pNumber === ownNumber)) &&
+				(matchesNumber || matchesLid) &&
 				(p.admin === "admin" || p.admin === "superadmin")
 			);
 		});
@@ -269,45 +273,6 @@ const processBackfillQueue = async () => {
 			{ primaryJid, count: entries.length },
 			"Processing summary backfill queue",
 		);
-
-		if (config.destinations.whatsapp && state.waClient) {
-			try {
-				const metadata = await state.waClient.groupMetadata(
-					config.destinations.whatsapp,
-				);
-				const ownJid = state.waClient.user?.id;
-				const ownLid = state.waClient.user?.lid;
-				const ownNumber = ownJid?.split(":")[0]?.split("@")[0];
-				const ownParticipant = metadata?.participants?.find((p) => {
-					const pNumber = p.id?.split(":")[0]?.split("@")[0];
-					return (
-						p.id === ownJid ||
-						p.id === ownLid ||
-						(pNumber && pNumber === ownNumber)
-					);
-				});
-				state.logger?.info(
-					{
-						requestedJid: config.destinations.whatsapp,
-						resolvedId: metadata?.id,
-						subject: metadata?.subject,
-						size: metadata?.size,
-						announce: metadata?.announce,
-						participantCount: metadata?.participants?.length,
-						participants: metadata?.participants,
-						ownParticipant,
-						ownJid,
-						ownLid,
-					},
-					"Backfill queue: WhatsApp destination group metadata",
-				);
-			} catch (err) {
-				state.logger?.error(
-					{ err, jid: config.destinations.whatsapp },
-					"Backfill queue: failed to fetch WhatsApp destination group metadata",
-				);
-			}
-		}
 
 		let whatsappBroken = false;
 		const failures = [];
