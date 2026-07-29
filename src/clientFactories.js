@@ -1,5 +1,6 @@
 import makeWASocket, {
 	fetchLatestBaileysVersion,
+	fetchLatestWaWebVersion,
 } from "@whiskeysockets/baileys";
 import discordJs from "discord.js";
 
@@ -40,5 +41,12 @@ export const getBaileysVersion = async () => {
 	if (typeof overrides.getBaileysVersion === "function") {
 		return overrides.getBaileysVersion();
 	}
+	// fetchLatestWaWebVersion() reads WhatsApp's own service worker directly,
+	// which tracks live rollouts faster than the GitHub-mirrored copy that
+	// fetchLatestBaileysVersion() uses (that one needs a human to notice and
+	// commit an update, so it can lag behind during fast WA version churn —
+	// this caused persistent 405 connection failures in practice).
+	const direct = await fetchLatestWaWebVersion();
+	if (direct.isLatest) return direct;
 	return fetchLatestBaileysVersion();
 };
