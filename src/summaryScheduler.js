@@ -261,7 +261,12 @@ const processBackfillQueue = async () => {
 		const queue = JSON.parse(raw);
 		const { primaryJid, entries, delayMs = 8000 } = queue;
 		const config = state.settings.SummaryChannels?.[primaryJid];
-		if (!config?.destinations || !entries?.length) {
+		// An explicit destinations override lets a one-off run target only
+		// one platform (e.g. backfilling WhatsApp from existing Discord
+		// history) without touching the live SummaryChannels config that
+		// the real scheduler uses.
+		const destinations = queue.destinations || config?.destinations;
+		if (!destinations || !entries?.length) {
 			state.logger?.warn(
 				{ primaryJid },
 				"Backfill queue: no destinations or entries, skipping",
@@ -270,7 +275,7 @@ const processBackfillQueue = async () => {
 		}
 
 		state.logger?.info(
-			{ primaryJid, count: entries.length },
+			{ primaryJid, count: entries.length, destinations },
 			"Processing summary backfill queue",
 		);
 
@@ -281,19 +286,13 @@ const processBackfillQueue = async () => {
 			const fullText = `${entry.title}\n${entry.summary}`;
 			const entryFailures = [];
 
-			if (config.destinations.discord) {
-				const ok = await sendToDiscord(
-					config.destinations.discord,
-					fullText,
-				);
+			if (destinations.discord) {
+				const ok = await sendToDiscord(destinations.discord, fullText);
 				if (!ok) entryFailures.push("discord");
 			}
 
-			if (config.destinations.whatsapp && !whatsappBroken) {
-				const ok = await sendToWhatsApp(
-					config.destinations.whatsapp,
-					fullText,
-				);
+			if (destinations.whatsapp && !whatsappBroken) {
+				const ok = await sendToWhatsApp(destinations.whatsapp, fullText);
 				if (!ok) {
 					entryFailures.push("whatsapp");
 					// Group permission issues won't clear up mid-run — stop
@@ -301,7 +300,7 @@ const processBackfillQueue = async () => {
 					// posting to Discord for the remaining entries.
 					whatsappBroken = true;
 				}
-			} else if (config.destinations.whatsapp && whatsappBroken) {
+			} else if (destinations.whatsapp && whatsappBroken) {
 				entryFailures.push("whatsapp");
 			}
 
