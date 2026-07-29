@@ -160,6 +160,48 @@ test("summaryBuffer: shouldTrigger on time threshold", () => {
 	restoreObject(state.settings, originalSettings);
 });
 
+test("summaryBuffer: empty buffer at scheduled time doesn't trigger, and doesn't retroactively fire on a later message", () => {
+	const jid = "test-trigger-schedule-empty@g.us";
+	summaryBuffer.clearBuffer(jid);
+	const originalSettings = snapshotObject(state.settings);
+
+	state.settings.SummaryMessageThreshold = 999;
+	state.settings.SummaryTimeThresholdHours = 999;
+	state.settings.SummaryChannels = {
+		[jid]: { scheduleTime: "00:00", destinations: { discord: "x" } },
+	};
+
+	// Last summary was days ago, well before today's 00:00 target.
+	sqliteStore.upsertSummaryState(jid, {
+		messageCount: 0,
+		lastSummaryAt: Date.now() - 3 * 24 * 60 * 60 * 1000,
+		previousSummary: "old summary",
+	});
+
+	// Buffer is empty — the scheduled window passes with nothing to report.
+	assert.equal(summaryBuffer.getTriggerReason(jid), null);
+
+	// That check should have marked today's window as acknowledged.
+	const stateAfterEmptyCheck = summaryBuffer.getState(jid);
+	assert.ok(
+		stateAfterEmptyCheck.lastSummaryAt > Date.now() - 60 * 1000,
+		"lastSummaryAt should have been advanced to roughly now",
+	);
+
+	// A message trickles in later in the day.
+	summaryBuffer.addMessage(jid, {
+		sender: "User",
+		content: "hi",
+		timestamp: Date.now(),
+	});
+
+	// It should NOT retroactively fire today's schedule trigger.
+	assert.equal(summaryBuffer.getTriggerReason(jid), null);
+
+	summaryBuffer.clearBuffer(jid);
+	restoreObject(state.settings, originalSettings);
+});
+
 test("summaryBuffer: setPreviousSummary and getState", () => {
 	const jid = "test-state@g.us";
 

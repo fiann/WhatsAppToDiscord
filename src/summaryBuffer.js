@@ -151,14 +151,31 @@ const summaryBuffer = {
 	getTriggerReason(channelJid) {
 		const config = getChannelConfig(channelJid);
 		const count = this.getMessageCount(channelJid);
-		if (count === 0) return null;
-
 		const summaryState = sqliteStore.getSummaryState(channelJid);
 		const lastSummaryAt = summaryState?.lastSummaryAt ?? 0;
 
-		if (config.scheduleTime && isScheduledTimeDue(config.scheduleTime, lastSummaryAt)) {
+		if (
+			config.scheduleTime &&
+			isScheduledTimeDue(config.scheduleTime, lastSummaryAt)
+		) {
+			if (count === 0) {
+				// Nothing to summarize for today's scheduled window. Mark it
+				// acknowledged so a message that trickles in later today
+				// doesn't read as "we're still owed today's digest" and
+				// trigger a belated one-message catch-up at whatever time
+				// it happens to arrive — it should just wait for the next
+				// real trigger instead.
+				sqliteStore.upsertSummaryState(channelJid, {
+					messageCount: 0,
+					lastSummaryAt: Date.now(),
+					previousSummary: summaryState?.previousSummary || null,
+				});
+				return null;
+			}
 			return "schedule";
 		}
+
+		if (count === 0) return null;
 
 		if (count >= config.messageThreshold) return "count";
 
