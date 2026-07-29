@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import state from "./state.js";
+import storage from "./storage.js";
 import summaryAI from "./summaryAI.js";
 import summaryBuffer from "./summaryBuffer.js";
 import utils from "./utils.js";
@@ -8,7 +9,49 @@ import utils from "./utils.js";
 let intervalId = null;
 let backfillRunning = false;
 const BACKFILL_QUEUE_PATH = path.join("./storage", "backfill-queue.json");
+const SETTINGS_PATCH_PATH = path.join("./storage", "settings-patch.json");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Process a one-off settings patch file (./storage/settings-patch.json), if
+ * present. Applies a shallow merge into a SummaryChannels[primaryJid]
+ * destinations object on the LIVE in-memory state.settings, then saves —
+ * unlike a direct database edit while the process is already running, which
+ * only touches disk and gets silently overwritten by the next periodic
+ * autosave of the stale in-memory copy.
+ * Format: { primaryJid, destinations: { whatsapp?, discord? } }.
+ */
+const processSettingsPatch = async () => {
+	let raw;
+	try {
+		raw = await fs.readFile(SETTINGS_PATCH_PATH, "utf8");
+	} catch {
+		return;
+	}
+	try {
+		const patch = JSON.parse(raw);
+		const { primaryJid, destinations } = patch;
+		if (!primaryJid || !destinations) {
+			state.logger?.warn({ patch }, "Settings patch: missing primaryJid or destinations, skipping");
+			return;
+		}
+		if (!state.settings.SummaryChannels) state.settings.SummaryChannels = {};
+		const existing = state.settings.SummaryChannels[primaryJid] || {};
+		state.settings.SummaryChannels[primaryJid] = {
+			...existing,
+			destinations: { ...existing.destinations, ...destinations },
+		};
+		await storage.saveSettings();
+		state.logger?.info(
+			{ primaryJid, destinations: state.settings.SummaryChannels[primaryJid].destinations },
+			"Applied settings patch to live in-memory settings",
+		);
+	} catch (err) {
+		state.logger?.error({ err }, "Failed to apply settings patch");
+	} finally {
+		await fs.unlink(SETTINGS_PATCH_PATH).catch(() => {});
+	}
+};
 
 /**
  * Post an alert to the control room for a summary pipeline failure that
@@ -441,6 +484,10 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
  * Scheduler tick — check all configured channels.
  */
 const tick = async () => {
+	processSettingsPatch().catch((err) =>
+		state.logger?.error({ err }, "Settings patch tick failed"),
+	);
+
 	if (!state.settings.SummaryEnabled) return;
 
 	processBackfillQueue().catch((err) =>
