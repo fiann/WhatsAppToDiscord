@@ -224,6 +224,38 @@ const processBackfillQueue = async () => {
 			"Processing summary backfill queue",
 		);
 
+		if (config.destinations.whatsapp && state.waClient) {
+			try {
+				const metadata = await state.waClient.groupMetadata(
+					config.destinations.whatsapp,
+				);
+				const ownJid = state.waClient.user?.id;
+				const ownNumber = ownJid?.split(":")[0]?.split("@")[0];
+				const ownParticipant = metadata?.participants?.find((p) => {
+					const pNumber = p.id?.split(":")[0]?.split("@")[0];
+					return p.id === ownJid || (pNumber && pNumber === ownNumber);
+				});
+				state.logger?.info(
+					{
+						requestedJid: config.destinations.whatsapp,
+						resolvedId: metadata?.id,
+						subject: metadata?.subject,
+						size: metadata?.size,
+						announce: metadata?.announce,
+						participantCount: metadata?.participants?.length,
+						ownParticipant,
+						ownJid,
+					},
+					"Backfill queue: WhatsApp destination group metadata",
+				);
+			} catch (err) {
+				state.logger?.error(
+					{ err, jid: config.destinations.whatsapp },
+					"Backfill queue: failed to fetch WhatsApp destination group metadata",
+				);
+			}
+		}
+
 		let whatsappBroken = false;
 		const failures = [];
 
