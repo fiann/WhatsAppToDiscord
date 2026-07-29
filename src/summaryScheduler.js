@@ -128,11 +128,14 @@ const canSendToWhatsAppGroup = async (jid) => {
 		const metadata = await state.waClient.groupMetadata(jid);
 		if (!metadata?.announce) return true;
 		const ownJid = state.waClient.user?.id;
+		const ownLid = state.waClient.user?.lid;
 		const ownNumber = ownJid?.split(":")[0]?.split("@")[0];
 		const isAdmin = metadata.participants?.some((p) => {
 			const pNumber = p.id?.split(":")[0]?.split("@")[0];
 			return (
-				(p.id === ownJid || (pNumber && pNumber === ownNumber)) &&
+				(p.id === ownJid ||
+					p.id === ownLid ||
+					(pNumber && pNumber === ownNumber)) &&
 				(p.admin === "admin" || p.admin === "superadmin")
 			);
 		});
@@ -273,10 +276,15 @@ const processBackfillQueue = async () => {
 					config.destinations.whatsapp,
 				);
 				const ownJid = state.waClient.user?.id;
+				const ownLid = state.waClient.user?.lid;
 				const ownNumber = ownJid?.split(":")[0]?.split("@")[0];
 				const ownParticipant = metadata?.participants?.find((p) => {
 					const pNumber = p.id?.split(":")[0]?.split("@")[0];
-					return p.id === ownJid || (pNumber && pNumber === ownNumber);
+					return (
+						p.id === ownJid ||
+						p.id === ownLid ||
+						(pNumber && pNumber === ownNumber)
+					);
 				});
 				state.logger?.info(
 					{
@@ -286,8 +294,10 @@ const processBackfillQueue = async () => {
 						size: metadata?.size,
 						announce: metadata?.announce,
 						participantCount: metadata?.participants?.length,
+						participants: metadata?.participants,
 						ownParticipant,
 						ownJid,
+						ownLid,
 					},
 					"Backfill queue: WhatsApp destination group metadata",
 				);
