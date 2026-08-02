@@ -218,6 +218,15 @@ const summaryBuffer = {
 	},
 
 	/**
+	 * Remove specific buffered messages by their row IDs. Used to drop a
+	 * single day's messages after repeated summary-generation failures,
+	 * without touching the rest of the channel's buffer.
+	 */
+	deleteMessagesByIds(ids) {
+		sqliteStore.deleteSummaryMessagesByIds(ids);
+	},
+
+	/**
 	 * Remove a message from the buffer by its WhatsApp message ID.
 	 * Called when a message is deleted on WhatsApp.
 	 */

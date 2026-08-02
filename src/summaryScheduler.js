@@ -8,6 +8,16 @@ import utils from "./utils.js";
 
 let intervalId = null;
 let backfillRunning = false;
+/**
+ * Tracks consecutive generation failures per "channelJid:dayKey" so a day
+ * whose content deterministically fails verification (e.g. the model keeps
+ * fabricating the same detail every retry) doesn't get re-attempted forever
+ * — the buffer only clears once a day succeeds, so without this the
+ * scheduler would re-run the same failing generation on every tick
+ * indefinitely, burning API calls and re-alerting control-room each time.
+ */
+const dayFailureCounts = new Map();
+const DAY_FAILURE_GIVE_UP_THRESHOLD = 3;
 const BACKFILL_QUEUE_PATH = path.join("./storage", "backfill-queue.json");
 const SETTINGS_PATCH_PATH = path.join("./storage", "settings-patch.json");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -401,15 +411,40 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
 		);
 
 		if (error) {
+			const failureKey = `${primaryJid}:${dayKey}`;
+			const failureCount = (dayFailureCounts.get(failureKey) || 0) + 1;
+			dayFailureCounts.set(failureKey, failureCount);
+
 			state.logger?.error(
-				{ primaryJid, dayKey, error },
+				{ primaryJid, dayKey, error, failureCount },
 				"Summary generation failed for this day, skipping",
 			);
-			await notifyControlRoom(
-				`generation failed for #${channelName} on ${dayKey}: ${error}`,
-			);
+
+			if (failureCount >= DAY_FAILURE_GIVE_UP_THRESHOLD) {
+				// Deterministic failure (e.g. the model keeps fabricating the
+				// same detail against this specific content) — retrying on
+				// every future tick won't help. Drop just this day's messages
+				// so the buffer stops re-triggering the same generation call,
+				// and alert with a content preview so it can be reviewed and
+				// summarized manually if desired.
+				const preview = dayMessages
+					.slice(0, 3)
+					.map((m) => `${m.sender}: ${(m.content || m.mediaDescription || "").slice(0, 120)}`)
+					.join(" | ");
+				await notifyControlRoom(
+					`gave up on #${channelName} for ${dayKey} after ${failureCount} failed attempts (${error}) — dropped ${dayMessages.length} message(s) from the buffer so it stops retrying. Preview: ${preview}`,
+				);
+				summaryBuffer.deleteMessagesByIds(dayMessages.map((m) => m.id));
+				dayFailureCounts.delete(failureKey);
+			} else if (failureCount === 1) {
+				await notifyControlRoom(
+					`generation failed for #${channelName} on ${dayKey}: ${error} (will retry)`,
+				);
+			}
 			continue;
 		}
+
+		dayFailureCounts.delete(`${primaryJid}:${dayKey}`);
 
 		const dateStr = new Date(`${dayKey}T12:00:00Z`).toLocaleDateString(
 			"en-US",

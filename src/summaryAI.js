@@ -20,7 +20,8 @@ Content rules:
 8. Do not mention moderation actions, bans, kicks, or warnings issued to members — omit these entirely, including any discussion of a member being banned or the reasons for it.
 9. If a member was banned (e.g. for spam, unsolicited job/recruitment posts, or other rule violations), exclude all of that member's messages from that day entirely — do not summarize or reference their content, even indirectly.
 10. Omit procedural housekeeping that isn't part of the actual conversation — e.g. a moderator reminding someone to follow posting guidelines, a member apologizing for or explaining an absence, logistics about who can or can't attend/remote into a session, or other administrative back-and-forth. Capture the substance of what people discussed, not the guardrails around how they discussed it. Never frame any member's conduct in a way that could embarrass them.
-11. Do still include procedural content that is a genuine announcement to the whole group: a change to community rules (not just a reminder of existing ones), a welcome to a new member, an announcement of an upcoming event, or reading/prep material assigned for a future event.`;
+11. Do still include procedural content that is a genuine announcement to the whole group: a change to community rules (not just a reminder of existing ones), a welcome to a new member, an announcement of an upcoming event, or reading/prep material assigned for a future event.
+12. Never identify a podcast, show, book, article, or other media by a specific title, host, or author unless that name is stated in the transcript, or was already established in the previous summary you're given as context. If participants refer to content only by a description (e.g. "the podcast", "Berg's interview") and no name was given in the transcript or established in the previous summary, refer to it the same way — do not use outside knowledge to guess or supply a real title, host, or publication.`;
 
 /**
  * Format buffered messages into a transcript string for the AI.
@@ -150,23 +151,32 @@ const providers = {
   },
 };
 
-const VERIFICATION_SYSTEM_PROMPT = `You are fact-checking an AI-generated chat summary against its source transcript. Your only job is to catch fabrication — check whether every person, event, date, or claim in the summary is actually supported by the transcript below it.
+const VERIFICATION_SYSTEM_PROMPT = `You are fact-checking an AI-generated chat summary against its source material. Your only job is to catch fabrication — check whether every person, event, date, or claim in the summary is actually supported by the material below it.
 
-Do not evaluate style, tone, formatting, or completeness (it's fine and expected for a summary to omit things). Only flag content that is fabricated, i.e. not grounded in the transcript at all — invented people, invented events, invented quotes, or dates/details that contradict the transcript.
+The source material has two parts: the previous day's summary (given to the summarizer only for continuity — carrying forward a name, topic, or detail from it is legitimate, not fabrication) and today's transcript (the actual new content being summarized). A claim is grounded if it's supported by EITHER part.
+
+Do not evaluate style, tone, formatting, or completeness (it's fine and expected for a summary to omit things). Only flag content that is fabricated, i.e. not grounded in either part at all — invented people, invented events, invented quotes, or dates/details that contradict the source material.
 
 Respond with exactly one line:
-- If every claim in the summary is grounded in the transcript, respond with exactly: VALID
+- If every claim in the summary is grounded, respond with exactly: VALID
 - If the summary contains fabricated content, respond with: INVALID: <one sentence naming the specific fabrication>`;
 
 /**
  * Ask the model to fact-check a candidate summary against its source
- * transcript, to catch fabrication that doesn't trip the structural
+ * material, to catch fabrication that doesn't trip the structural
  * looksDegenerate() heuristic (e.g. a clean-looking paragraph that still
- * invents a person or event not present in the transcript).
+ * invents a person or event not present in the transcript or prior context).
+ * @param {string} transcript - Today's raw transcript.
+ * @param {string|null} previousSummary - Prior day's summary, given to the
+ *   summarizer as continuity context — a claim carried forward from it is
+ *   legitimately grounded, not fabricated.
  * @returns {Promise<{grounded: boolean, reason?: string}>}
  */
-const verifyGrounding = async (transcript, summary, config) => {
-  const userPrompt = `=== TRANSCRIPT ===\n${transcript}\n\n=== CANDIDATE SUMMARY ===\n${summary}`;
+const verifyGrounding = async (transcript, previousSummary, summary, config) => {
+  const previousSummarySection = previousSummary
+    ? `=== PREVIOUS DAY'S SUMMARY (context only) ===\n${previousSummary}\n\n`
+    : "";
+  const userPrompt = `${previousSummarySection}=== TODAY'S TRANSCRIPT ===\n${transcript}\n\n=== CANDIDATE SUMMARY ===\n${summary}`;
   const { text, error } = await callClaudeAPI(
     VERIFICATION_SYSTEM_PROMPT,
     userPrompt,
@@ -259,6 +269,7 @@ const summaryAI = {
       if (providerName === "claude") {
         const { grounded, reason } = await verifyGrounding(
           transcript,
+          previousSummary,
           result.summary,
           providerConfig,
         );

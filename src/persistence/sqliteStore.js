@@ -515,6 +515,15 @@ const sqliteStore = {
 			.run(discordMessageId);
 	},
 
+	deleteSummaryMessagesByIds(ids) {
+		this._ensureDbReady();
+		if (!ids?.length) return;
+		const placeholders = ids.map(() => "?").join(",");
+		this._db
+			.prepare(`DELETE FROM summary_buffer WHERE id IN (${placeholders})`)
+			.run(...ids);
+	},
+
 	getSummaryMessages(channelJid) {
 		this._ensureDbReady();
 		const rows = this._db
