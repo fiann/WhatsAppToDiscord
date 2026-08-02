@@ -217,7 +217,17 @@ const sendToDiscord = async (channelId, text) => {
 		// Split long messages for Discord's 2000 char limit
 		const chunks = splitMessage(text, 2000);
 		for (const chunk of chunks) {
-			await channel.send(chunk);
+			// discord.js's default REST timeout (15s) can trip on a slow
+			// response even after Discord has already created the message;
+			// it then retries the same request. Without a nonce, that retry
+			// creates a genuine second message with identical content.
+			// enforceNonce makes the retry a no-op if the first attempt
+			// actually landed.
+			await channel.send({
+				content: chunk,
+				nonce: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+				enforceNonce: true,
+			});
 		}
 		return true;
 	} catch (err) {
