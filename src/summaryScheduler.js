@@ -9,6 +9,16 @@ import utils from "./utils.js";
 let intervalId = null;
 let backfillRunning = false;
 /**
+ * Guards against overlapping processChannel() runs for the same channel.
+ * setInterval(tick, ...) fires on a fixed wall-clock cadence regardless of
+ * whether the previous tick's async work has finished — a multi-day
+ * catch-up (several AI calls plus an 8s pause between days) can easily
+ * outlast one interval, so without this a second tick starts processing
+ * the same not-yet-cleared buffer concurrently, producing two independent
+ * (differently-worded) summaries for the same day(s).
+ */
+const channelsInProgress = new Set();
+/**
  * Tracks consecutive generation failures per "channelJid:dayKey" so a day
  * whose content deterministically fails verification (e.g. the model keeps
  * fabricating the same detail every retry) doesn't get re-attempted forever
@@ -515,8 +525,16 @@ const tick = async () => {
 
 	const channels = summaryBuffer.getConfiguredChannels();
 	for (const jid of channels) {
+		if (channelsInProgress.has(jid)) {
+			state.logger?.warn(
+				{ jid },
+				"Skipping tick: previous summary run for this channel is still in progress",
+			);
+			continue;
+		}
 		const reason = summaryBuffer.getTriggerReason(jid);
 		if (reason) {
+			channelsInProgress.add(jid);
 			try {
 				await processChannel(jid, reason);
 			} catch (err) {
@@ -524,6 +542,8 @@ const tick = async () => {
 					{ err, jid },
 					"Error processing summary for channel",
 				);
+			} finally {
+				channelsInProgress.delete(jid);
 			}
 		}
 	}
@@ -616,7 +636,19 @@ const summaryScheduler = {
 	 * regardless of thresholds.
 	 */
 	async triggerNow(primaryJid) {
-		await processChannel(primaryJid);
+		if (channelsInProgress.has(primaryJid)) {
+			state.logger?.warn(
+				{ jid: primaryJid },
+				"triggerNow: a summary run for this channel is already in progress, skipping",
+			);
+			return;
+		}
+		channelsInProgress.add(primaryJid);
+		try {
+			await processChannel(primaryJid);
+		} finally {
+			channelsInProgress.delete(primaryJid);
+		}
 	},
 
 	/**

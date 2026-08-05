@@ -21,7 +21,8 @@ Content rules:
 9. If a member was banned (e.g. for spam, unsolicited job/recruitment posts, or other rule violations), exclude all of that member's messages from that day entirely — do not summarize or reference their content, even indirectly.
 10. Omit procedural housekeeping that isn't part of the actual conversation — e.g. a moderator reminding someone to follow posting guidelines, a member apologizing for or explaining an absence, logistics about who can or can't attend/remote into a session, or other administrative back-and-forth. Capture the substance of what people discussed, not the guardrails around how they discussed it. Never frame any member's conduct in a way that could embarrass them.
 11. Do still include procedural content that is a genuine announcement to the whole group: a change to community rules (not just a reminder of existing ones), a welcome to a new member, an announcement of an upcoming event, or reading/prep material assigned for a future event.
-12. Never identify a podcast, show, book, article, or other media by a specific title, host, or author unless that name is stated in the transcript, or was already established in the previous summary you're given as context. If participants refer to content only by a description (e.g. "the podcast", "Berg's interview") and no name was given in the transcript or established in the previous summary, refer to it the same way — do not use outside knowledge to guess or supply a real title, host, or publication.`;
+12. Never identify a podcast, show, book, article, or other media by a specific title, host, or author unless that name is stated in the transcript, or was already established in the previous summary you're given as context. If participants refer to content only by a description (e.g. "the podcast", "Berg's interview") and no name was given in the transcript or established in the previous summary, refer to it the same way — do not use outside knowledge to guess or supply a real title, host, or publication.
+13. The first time you mention a participant in the summary, use their full name. Every subsequent mention of that same person, use their first name only. Exception: if two or more distinct participants share the same first name, use each of their full names throughout to keep them unambiguous.`;
 
 /**
  * Format buffered messages into a transcript string for the AI.
@@ -251,13 +252,17 @@ const summaryAI = {
       baseUrl: config.baseUrl || state.settings.SummaryAIBaseUrl || "",
     };
 
+    let lastFailureReason = null;
+
     for (let attempt = 1; attempt <= 3; attempt++) {
       const result = await provider(userPrompt, providerConfig);
       if (result.error) return result;
 
       if (looksDegenerate(result.summary)) {
+        lastFailureReason =
+          "response looked structurally degenerate (echoed prompt scaffolding, leaked transcript lines, or runaway repetition)";
         state.logger?.warn(
-          { attempt },
+          { attempt, reason: lastFailureReason },
           "Summary generation looked degenerate, retrying",
         );
         continue;
@@ -274,6 +279,7 @@ const summaryAI = {
           providerConfig,
         );
         if (!grounded) {
+          lastFailureReason = reason;
           state.logger?.warn(
             { attempt, reason },
             "Summary failed grounding verification, retrying",
@@ -285,7 +291,11 @@ const summaryAI = {
       return result;
     }
 
-    return { error: "Summary generation produced degenerate or unverifiable output after retries" };
+    return {
+      error: lastFailureReason
+        ? `Summary generation failed after 3 attempts: ${lastFailureReason}`
+        : "Summary generation produced degenerate or unverifiable output after retries",
+    };
   },
 
   /** Exposed for testing. */
