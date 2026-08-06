@@ -374,11 +374,23 @@ const processBackfillQueue = async () => {
 };
 
 /**
- * Group buffered messages into calendar-day buckets in the given timezone,
- * so a multi-day gap (e.g. the bot was down) produces one summary per day
+ * Group buffered messages into day buckets in the given timezone, so a
+ * multi-day gap (e.g. the bot was down) produces one summary per day
  * instead of a single summary spanning the whole gap.
+ *
+ * Buckets are anchored to the schedule's cutoff time rather than literal
+ * midnight: with a 08:00 schedule, "yesterday" runs from 08:00 yesterday to
+ * 08:00 today. Without this, any message sent between midnight and 08:00 on
+ * the trigger day would land in its own bucket separate from the rest of
+ * yesterday's conversation — a completely normal daily occurrence, not a
+ * gap — and get mislabeled as a multi-day catch-up.
  */
-const groupMessagesByDay = (messages, timezone) => {
+const groupMessagesByDay = (messages, timezone, scheduleTime) => {
+	const match = /^(\d{1,2}):(\d{2})$/.exec(scheduleTime || "");
+	const shiftMs = match
+		? (Number(match[1]) * 60 + Number(match[2])) * 60 * 1000
+		: 0;
+
 	const dayFormatter = new Intl.DateTimeFormat("en-CA", {
 		timeZone: timezone,
 		year: "numeric",
@@ -387,7 +399,7 @@ const groupMessagesByDay = (messages, timezone) => {
 	});
 	const byDay = new Map();
 	for (const message of messages) {
-		const dayKey = dayFormatter.format(new Date(message.timestamp));
+		const dayKey = dayFormatter.format(new Date(message.timestamp - shiftMs));
 		if (!byDay.has(dayKey)) byDay.set(dayKey, []);
 		byDay.get(dayKey).push(message);
 	}
@@ -409,7 +421,8 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
 	if (messages.length === 0) return;
 
 	const tz = state.settings.SummaryTimezone || "America/Los_Angeles";
-	const dayBuckets = groupMessagesByDay(messages, tz);
+	const scheduleTime = config.scheduleTime || state.settings.SummaryScheduleTime || null;
+	const dayBuckets = groupMessagesByDay(messages, tz, scheduleTime);
 	const isMultiDayCatchUp = dayBuckets.length > 1;
 	const channelName = utils.whatsapp.jidToName(primaryJid) || primaryJid;
 	const footer = buildFooter();
@@ -669,6 +682,7 @@ const summaryScheduler = {
 	_tick: tick,
 	_splitMessage: splitMessage,
 	_buildFooter: buildFooter,
+	_groupMessagesByDay: groupMessagesByDay,
 };
 
 export default summaryScheduler;

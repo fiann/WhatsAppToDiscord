@@ -533,6 +533,42 @@ test("summaryScheduler: buildFooter with links", () => {
 	restoreObject(state.settings, originalSettings);
 });
 
+test("summaryScheduler: groupMessagesByDay buckets by the schedule cutoff, not literal midnight", () => {
+	const messages = [
+		{ timestamp: Date.UTC(2026, 7, 4, 22, 0) }, // Aug 4, 22:00 UTC
+		{ timestamp: Date.UTC(2026, 7, 5, 2, 0) }, // Aug 5, 02:00 UTC — after midnight, before the 08:00 cutoff
+		{ timestamp: Date.UTC(2026, 7, 5, 7, 59) }, // Aug 5, 07:59 UTC — still before the cutoff
+	];
+	const buckets = summaryScheduler._groupMessagesByDay(messages, "UTC", "08:00");
+	// All three land in one bucket — a routine after-midnight trickle before
+	// the scheduled run, not a multi-day gap.
+	assert.equal(buckets.length, 1);
+	assert.equal(buckets[0][0], "2026-08-04");
+	assert.equal(buckets[0][1].length, 3);
+});
+
+test("summaryScheduler: groupMessagesByDay still splits a genuine multi-day gap", () => {
+	const messages = [
+		{ timestamp: Date.UTC(2026, 7, 4, 9, 0) }, // Aug 4, after that day's 08:00 cutoff
+		{ timestamp: Date.UTC(2026, 7, 6, 9, 0) }, // Aug 6 — two scheduled cycles later
+	];
+	const buckets = summaryScheduler._groupMessagesByDay(messages, "UTC", "08:00");
+	assert.equal(buckets.length, 2);
+	assert.deepEqual(
+		buckets.map(([day]) => day),
+		["2026-08-04", "2026-08-06"],
+	);
+});
+
+test("summaryScheduler: groupMessagesByDay falls back to literal midnight when no scheduleTime is set", () => {
+	const messages = [
+		{ timestamp: Date.UTC(2026, 7, 4, 23, 0) },
+		{ timestamp: Date.UTC(2026, 7, 5, 1, 0) },
+	];
+	const buckets = summaryScheduler._groupMessagesByDay(messages, "UTC", null);
+	assert.equal(buckets.length, 2);
+});
+
 test("summaryScheduler: buildFooter empty when no links", () => {
 	const originalSettings = snapshotObject(state.settings);
 
