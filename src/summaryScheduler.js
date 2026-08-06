@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import historyBackfillProbe from "./historyBackfillProbe.js";
 import state from "./state.js";
 import storage from "./storage.js";
 import summaryAI from "./summaryAI.js";
@@ -528,6 +529,10 @@ const processChannel = async (primaryJid, triggerReason = "manual") => {
 const tick = async () => {
 	processSettingsPatch().catch((err) =>
 		state.logger?.error({ err }, "Settings patch tick failed"),
+	);
+
+	historyBackfillProbe.processHistoryBackfillProbe().catch((err) =>
+		state.logger?.error({ err }, "History backfill probe tick failed"),
 	);
 
 	if (!state.settings.SummaryEnabled) return;

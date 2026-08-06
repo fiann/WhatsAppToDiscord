@@ -425,6 +425,24 @@ const sqliteStore = {
 		};
 	},
 
+	getMessageStoreEntriesForJid(jid) {
+		this._ensureDbReady();
+		const rows = this._db
+			.prepare(
+				"SELECT value FROM message_store WHERE cache_key LIKE ? ESCAPE '\\'",
+			)
+			.all(`${jid.replace(/[\\%_]/g, "\\$&")}|%`);
+		return rows
+			.map((row) => {
+				try {
+					return this._decodeStoredValue(row.value);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean);
+	},
+
 	setMessageStore(cacheKey, value, expiresAt) {
 		this._ensureDbReady();
 		const now = Date.now();
