@@ -435,7 +435,7 @@ const sqliteStore = {
 		return rows
 			.map((row) => {
 				try {
-					return this._decodeStoredValue(row.value);
+					return JSON.parse(this._decodeStoredValue(row.value));
 				} catch {
 					return null;
 				}
