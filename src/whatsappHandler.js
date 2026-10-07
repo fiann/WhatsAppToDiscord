@@ -21,6 +21,7 @@ import { getImageSharp } from "./imageLibs.js";
 import { createAudioSendContentNormalizer } from "./internal/audioSendNormalization.js";
 import { createStickerSendContentNormalizer } from "./internal/stickerSendNormalization.js";
 import messageStore from "./messageStore.js";
+import retryCounterCache from "./retryCounterCache.js";
 import {
 	clearPendingNewsletterSends,
 	getNewsletterAckError,
@@ -2909,6 +2910,7 @@ const connectToWhatsApp = async (retry = 1) => {
 		markOnlineOnConnect: false,
 		syncFullHistory: true,
 		shouldSyncHistoryMessage: () => true,
+		msgRetryCounterCache: retryCounterCache,
 		generateHighQualityLinkPreview: true,
 		cachedGroupMetadata: async (jid) =>
 			groupMetadataCache.get(utils.whatsapp.formatJid(jid)),
