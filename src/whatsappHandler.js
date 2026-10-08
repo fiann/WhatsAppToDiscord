@@ -22,7 +22,10 @@ import { createAudioSendContentNormalizer } from "./internal/audioSendNormalizat
 import { createStickerSendContentNormalizer } from "./internal/stickerSendNormalization.js";
 import messageStore from "./messageStore.js";
 import retryCounterCache from "./retryCounterCache.js";
-import { attachRetryReceiptDiagnostics } from "./retryDiagnostics.js";
+import {
+	attachInboundGroupStanzaDiagnostics,
+	attachRetryReceiptDiagnostics,
+} from "./retryDiagnostics.js";
 import {
 	clearPendingNewsletterSends,
 	getNewsletterAckError,
@@ -3028,6 +3031,7 @@ const connectToWhatsApp = async (retry = 1) => {
 	const credsListener = typeof saveState === "function" ? saveState : () => {};
 	client.ev.on("creds.update", credsListener);
 	attachRetryReceiptDiagnostics(client.ws, state.logger);
+	attachInboundGroupStanzaDiagnostics(client.ws, state.logger);
 	const contactUpdater = utils.whatsapp.updateContacts.bind(utils.whatsapp);
 	[
 		"chats.set",

@@ -36,3 +36,24 @@ test("retryDiagnostics: logs only up to the cap", () => {
 	assert.equal(logs.length, 2);
 	assert.equal(logs[1].sample, "2/2");
 });
+
+test("retryDiagnostics: describes inbound group stanza enc types", async () => {
+	const { describeGroupStanza, attachInboundGroupStanzaDiagnostics } = await import(
+		"../src/retryDiagnostics.js"
+	);
+	const stanza = {
+		tag: "message",
+		attrs: { id: "M1", from: "1@g.us", participant: "2:11@lid", addressing_mode: "lid" },
+		content: [{ tag: "enc", attrs: { type: "skmsg" } }],
+	};
+	assert.deepEqual(describeGroupStanza(stanza).encTypes, ["skmsg"]);
+
+	const ws = new EventEmitter();
+	const logs = [];
+	attachInboundGroupStanzaDiagnostics(ws, { info: (o) => logs.push(o) }, { maxLogged: 1 });
+	ws.emit("CB:message", { attrs: { from: "5@s.whatsapp.net" }, content: [] });
+	ws.emit("CB:message", stanza);
+	ws.emit("CB:message", stanza);
+	assert.equal(logs.length, 1);
+	assert.equal(logs[0].id, "M1");
+});

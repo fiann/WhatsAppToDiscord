@@ -45,4 +45,48 @@ const attachRetryReceiptDiagnostics = (
 	});
 };
 
-export { attachRetryReceiptDiagnostics, describeRetryReceipt };
+const describeGroupStanza = (node) => ({
+	id: node?.attrs?.id,
+	from: node?.attrs?.from,
+	participant: node?.attrs?.participant,
+	participantPn: node?.attrs?.participant_pn,
+	addressingMode: node?.attrs?.addressing_mode,
+	encTypes: Array.isArray(node?.content)
+		? node.content
+				.filter((child) => child?.tag === "enc")
+				.map((child) => child.attrs?.type)
+		: [],
+});
+
+// A group message normally arrives as an "skmsg" (encrypted with the author's
+// sender key), optionally alongside a "pkmsg"/"msg" carrying the pairwise-
+// encrypted sender key itself. "No session found to decrypt message" means we
+// never got that key; this shows whether the carrier was in the stanza at all.
+const attachInboundGroupStanzaDiagnostics = (
+	ws,
+	logger,
+	{ maxLogged = 150 } = {},
+) => {
+	if (!ws || typeof ws.on !== "function") return;
+	let logged = 0;
+	ws.on("CB:message", (node) => {
+		if (logged >= maxLogged) return;
+		if (!node?.attrs?.from?.endsWith?.("@g.us")) return;
+		logged += 1;
+		try {
+			logger?.info?.(
+				{ ...describeGroupStanza(node), sample: `${logged}/${maxLogged}` },
+				"Inbound group stanza diagnostics",
+			);
+		} catch {
+			// Diagnostics must never affect message handling.
+		}
+	});
+};
+
+export {
+	attachInboundGroupStanzaDiagnostics,
+	attachRetryReceiptDiagnostics,
+	describeGroupStanza,
+	describeRetryReceipt,
+};
