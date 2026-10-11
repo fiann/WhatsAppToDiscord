@@ -2931,6 +2931,12 @@ const connectToWhatsApp = async (retry = 1) => {
 		browser: ["Firefox (Linux)", "", ""],
 	});
 	client.contacts = state.contacts;
+	// Point state at the newest socket immediately. While unpaired, each
+	// pairing session lasts only ~2.5 minutes before a fresh socket replaces
+	// it; previously state.waClient was only updated once a connection
+	// opened, so /pairwithcode kept talking to the closed one ("Connection
+	// Closed") after the first session expired.
+	state.waClient = client;
 	patchSendMessageForLinkPreviews(client);
 	patchSendNodeForNewsletterMessages(client);
 	patchGroupMetadataForCache(client);
