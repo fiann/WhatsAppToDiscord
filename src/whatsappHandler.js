@@ -2928,7 +2928,11 @@ const connectToWhatsApp = async (retry = 1) => {
 
 			return stored.message || stored;
 		},
-		browser: ["Firefox (Linux)", "", ""],
+		// Baileys expects [OS, browser name, version]. The pairing-code
+		// handshake sends the browser name and platform id to the phone
+		// ("Chrome (Ubuntu)" etc.); the old ["Firefox (Linux)", "", ""] left the
+		// browser name empty, and the phone refused the code.
+		browser: ["Ubuntu", "Chrome", "22.04.4"],
 	});
 	client.contacts = state.contacts;
 	// Point state at the newest socket immediately. While unpaired, each
