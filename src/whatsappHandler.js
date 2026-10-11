@@ -20,6 +20,7 @@ import { createGroupRefreshScheduler } from "./groupMetadataRefresh.js";
 import { getImageSharp } from "./imageLibs.js";
 import { createAudioSendContentNormalizer } from "./internal/audioSendNormalization.js";
 import { createStickerSendContentNormalizer } from "./internal/stickerSendNormalization.js";
+import { createHistoryRelay } from "./historyRelay.js";
 import messageStore from "./messageStore.js";
 import retryCounterCache from "./retryCounterCache.js";
 import {
@@ -3319,6 +3320,38 @@ const connectToWhatsApp = async (retry = 1) => {
 				if (ts > state.startTime) state.startTime = ts;
 			}
 		}
+	});
+
+	// Opt-in (./storage/history-relay.json): relay recent history-sync messages
+	// that never reached Discord, e.g. after re-pairing the device.
+	const historyRelay = createHistoryRelay({
+		logger: state.logger,
+		isSeen: (message) => {
+			const remoteJid = utils.whatsapp.formatJid(message.key?.remoteJid);
+			if (messageStore.get({ ...message.key, remoteJid })) return true;
+			const id = normalizeBridgeMessageId(message.key?.id);
+			return id ? Object.hasOwn(state.lastMessages, id) : false;
+		},
+		shouldRelayJid: (jid) => {
+			const normalized = utils.whatsapp.formatJid(jid);
+			if (!normalized || normalized === "status@broadcast") return false;
+			if (isNewsletterJid(normalized)) return false;
+			if (
+				!state.chats[normalized] &&
+				summaryScheduler.isSummaryWhatsAppChannel(normalized)
+			) {
+				return false;
+			}
+			return utils.whatsapp.inWhitelist({ key: { remoteJid: normalized } });
+		},
+		relay: async (message) => {
+			client.ev.emit("messages.upsert", { messages: [message], type: "notify" });
+		},
+	});
+	client.ev.on("messaging-history.set", (payload) => {
+		historyRelay.handleBatch(payload).catch((err) =>
+			state.logger?.warn?.({ err }, "History relay: failed to handle batch"),
+		);
 	});
 
 	client.ev.on("messages.reaction", async (reactions) => {
