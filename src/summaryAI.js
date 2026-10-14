@@ -165,7 +165,7 @@ Respond with exactly one line:
 /**
  * Ask the model to fact-check a candidate summary against its source
  * material, to catch fabrication that doesn't trip the structural
- * looksDegenerate() heuristic (e.g. a clean-looking paragraph that still
+ * getDegenerateReason() heuristic (e.g. a clean-looking paragraph that still
  * invents a person or event not present in the transcript or prior context).
  * @param {string} transcript - Today's raw transcript.
  * @param {string|null} previousSummary - Prior day's summary, given to the
@@ -205,16 +205,27 @@ const verifyGrounding = async (transcript, previousSummary, summary, config) => 
  * containing moderation/guideline-enforcement exchanges, which can send the
  * model into a hallucinated "continuation" instead of a summary.
  */
-const looksDegenerate = (text) => {
-  if (!text) return true;
-  if (text.includes("===")) return true;
-  if (/\[\d{1,2}:\d{2}\]/.test(text)) return true;
-  if (/^>\s/m.test(text)) return true;
-  if (text.length > 3000) return true;
+// A busy day legitimately produces a long summary (~2.8k chars for a
+// 100-message day), so this only needs to catch runaway output.
+const MAX_SUMMARY_CHARS = 6000;
+
+/**
+ * Returns a short description of the first structural check the text fails,
+ * or null if it looks fine.
+ */
+const getDegenerateReason = (text) => {
+  if (!text) return "response was empty";
+  if (text.includes("===")) return 'contained "===" (leaked prompt scaffolding)';
+  if (/\[\d{1,2}:\d{2}\]/.test(text))
+    return "contained [HH:MM] timestamps (leaked transcript lines)";
+  if (/^>\s/m.test(text)) return 'contained lines starting with "> " (quoted transcript)';
+  if (text.length > MAX_SUMMARY_CHARS)
+    return `was ${text.length} characters, over the ${MAX_SUMMARY_CHARS} limit`;
   const lines = text.split("\n").filter(Boolean);
   const dupeCount = lines.length - new Set(lines).size;
-  if (lines.length > 5 && dupeCount / lines.length > 0.3) return true;
-  return false;
+  if (lines.length > 5 && dupeCount / lines.length > 0.3)
+    return "repeated the same lines (runaway repetition)";
+  return null;
 };
 
 const summaryAI = {
@@ -258,9 +269,9 @@ const summaryAI = {
       const result = await provider(userPrompt, providerConfig);
       if (result.error) return result;
 
-      if (looksDegenerate(result.summary)) {
-        lastFailureReason =
-          "response looked structurally degenerate (echoed prompt scaffolding, leaked transcript lines, or runaway repetition)";
+      const degenerateReason = getDegenerateReason(result.summary);
+      if (degenerateReason) {
+        lastFailureReason = `response failed a structural check: it ${degenerateReason}`;
         state.logger?.warn(
           { attempt, reason: lastFailureReason },
           "Summary generation looked degenerate, retrying",
@@ -270,7 +281,7 @@ const summaryAI = {
 
       // Structural check passed — also fact-check the summary against the
       // transcript to catch a clean-looking but fabricated summary (e.g.
-      // an invented person or event) that wouldn't trip looksDegenerate.
+      // an invented person or event) that wouldn't trip getDegenerateReason.
       if (providerName === "claude") {
         const { grounded, reason } = await verifyGrounding(
           transcript,
@@ -301,6 +312,8 @@ const summaryAI = {
   /** Exposed for testing. */
   formatTranscript,
   buildUserPrompt,
+  getDegenerateReason,
+  MAX_SUMMARY_CHARS,
   SYSTEM_PROMPT,
 };
 

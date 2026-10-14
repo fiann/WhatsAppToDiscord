@@ -579,3 +579,18 @@ test("summaryScheduler: buildFooter empty when no links", () => {
 
 	restoreObject(state.settings, originalSettings);
 });
+
+test("summaryAI: structural check allows long busy-day summaries but flags runaway output", () => {
+	const longButFine = `*Topic.* ${"A reasonably detailed sentence. ".repeat(100)}`;
+	assert.ok(longButFine.length > 3000 && longButFine.length < summaryAI.MAX_SUMMARY_CHARS);
+	assert.equal(summaryAI.getDegenerateReason(longButFine), null);
+
+	assert.match(
+		summaryAI.getDegenerateReason("x".repeat(summaryAI.MAX_SUMMARY_CHARS + 1)),
+		/over the \d+ limit/,
+	);
+	assert.match(summaryAI.getDegenerateReason("=== Period ==="), /===/);
+	assert.match(summaryAI.getDegenerateReason("[12:30] Alice: hi"), /timestamps/);
+	assert.match(summaryAI.getDegenerateReason("> quoted"), /quoted/);
+	assert.match(summaryAI.getDegenerateReason(""), /empty/);
+});
